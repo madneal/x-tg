@@ -81,8 +81,20 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     fun submitEmailCode(code: String) = client?.send("checkAuthenticationEmailCode", JSONObject().put("code", JSONObject().put("@type", "emailAddressAuthenticationCode").put("code", code)))
     fun submitCode(code: String) = client?.send("checkAuthenticationCode", JSONObject().put("code", code))
     fun resendCode() = client?.send("resendAuthenticationCode")
+    /** Replaces the phone number while TDLib is still in the login flow. */
+    fun changeAuthenticationPhoneNumber(phoneNumber: String) = submitPhoneNumber(phoneNumber)
     fun submitPassword(password: String) = client?.send("checkAuthenticationPassword", JSONObject().put("password", password))
     fun register(firstName: String, lastName: String) = client?.send("registerUser", JSONObject().put("first_name", firstName).put("last_name", lastName))
+
+    /** Removes this TDLib session from the device without deleting the Telegram account. */
+    suspend fun removeFromDevice() {
+        runCatching { client?.request("logOut") }
+        client?.close()
+    }
+
+    fun close() {
+        client?.close()
+    }
 
     fun logout() {
         _authState.value = AuthState.LoggingOut

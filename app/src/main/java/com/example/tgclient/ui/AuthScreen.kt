@@ -15,6 +15,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -43,6 +44,9 @@ fun AuthScreen(state: AuthState, viewModel: ChatwaveViewModel, accountManager: T
     var secondInput by rememberSaveable(activeAccountId) { mutableStateOf("") }
     var resendNonce by rememberSaveable(activeAccountId) { mutableStateOf(0) }
     var remainingSeconds by rememberSaveable(activeAccountId) { mutableStateOf(0) }
+    var phoneInput by rememberSaveable(activeAccountId) { mutableStateOf("") }
+    var showPhoneEditor by rememberSaveable(activeAccountId) { mutableStateOf(false) }
+    var showRemoveDialog by rememberSaveable(activeAccountId) { mutableStateOf(false) }
     val verification by viewModel.verification.collectAsStateWithLifecycle()
     val authStep = when (state) {
         AuthState.WaitPhoneNumber -> "phone"
@@ -87,9 +91,12 @@ fun AuthScreen(state: AuthState, viewModel: ChatwaveViewModel, accountManager: T
             if (accounts.size > 1) {
                 val currentIndex = accounts.indexOfFirst { it.id == activeAccountId }.coerceAtLeast(0)
                 val nextAccount = accounts[(currentIndex + 1) % accounts.size]
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                    Text(accounts[currentIndex].label, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    TextButton(onClick = { accountManager.switchAccount(nextAccount.id) }) { Text("Switch account") }
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(top = 8.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(accounts[currentIndex].label, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        TextButton(onClick = { accountManager.switchAccount(nextAccount.id) }) { Text("Switch account") }
+                    }
+                    TextButton(onClick = { showRemoveDialog = true }) { Text("Remove this account") }
                 }
             }
             Surface(
@@ -120,43 +127,82 @@ fun AuthScreen(state: AuthState, viewModel: ChatwaveViewModel, accountManager: T
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp, bottom = 20.dp),
                     )
-                    when (state) {
-                        AuthState.Loading, AuthState.LoggingOut -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-                        AuthState.MissingConfiguration -> {
-                            Text("Telegram API credentials are missing.", color = MaterialTheme.colorScheme.error)
-                            Text("Add telegram.apiId and telegram.apiHash to local.properties, then rebuild.")
+                    val canChangePhone = state != AuthState.WaitPhoneNumber &&
+                        state != AuthState.Loading &&
+                        state != AuthState.LoggingOut &&
+                        state != AuthState.MissingConfiguration &&
+                        state != AuthState.Ready
+                    if (showPhoneEditor) {
+                        Text("Use a different phone number for this account.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        AuthField("New phone number", "+1 555 123 4567", phoneInput, KeyboardType.Phone, "Send code", { phoneInput = it }) {
+                            input = ""
+                            showPhoneEditor = false
+                            viewModel.changeAuthenticationPhoneNumber(phoneInput.trim())
                         }
-                        AuthState.WaitPhoneNumber -> AuthField("Phone number", "+1 555 123 4567", input, KeyboardType.Phone, "Continue", { input = it }) { viewModel.submitPhone(input.trim()) }
-                        AuthState.WaitCode -> {
-                            AuthField("Verification code", "12345", input, KeyboardType.Number, "Verify", { input = it }) { viewModel.submitCode(input.trim()) }
+                        TextButton(onClick = { showPhoneEditor = false }, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
+                    } else {
+                        when (state) {
+                            AuthState.Loading, AuthState.LoggingOut -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                            AuthState.MissingConfiguration -> {
+                                Text("Telegram API credentials are missing.", color = MaterialTheme.colorScheme.error)
+                                Text("Add telegram.apiId and telegram.apiHash to local.properties, then rebuild.")
+                            }
+                            AuthState.WaitPhoneNumber -> AuthField("Phone number", "+1 555 123 4567", input, KeyboardType.Phone, "Continue", { input = it }) { viewModel.submitPhone(input.trim()) }
+                            AuthState.WaitCode -> {
+                                AuthField("Verification code", "12345", input, KeyboardType.Number, "Verify", { input = it }) { viewModel.submitCode(input.trim()) }
+                                TextButton(
+                                    onClick = {
+                                        resendNonce += 1
+                                        viewModel.resendCode()
+                                    },
+                                    enabled = remainingSeconds == 0,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(if (remainingSeconds > 0) "Resend code in ${remainingSeconds}s" else "Resend code")
+                                }
+                            }
+                            AuthState.WaitPassword -> AuthField("Password", "Two-step password", input, KeyboardType.Password, "Sign in", { input = it }) { viewModel.submitPassword(input) }
+                            AuthState.WaitRegistration -> {
+                                AuthField("First name", "", input, KeyboardType.Text, null, { input = it })
+                                AuthField("Last name (optional)", "", secondInput, KeyboardType.Text, "Create account", { secondInput = it }) { viewModel.register(input.trim(), secondInput.trim()) }
+                            }
+                            AuthState.WaitEmailAddress -> AuthField("Email address", "name@example.com", input, KeyboardType.Email, "Continue", { viewModel.submitEmail(input.trim()) })
+                            AuthState.WaitEmailCode -> AuthField("Email verification code", "12345", input, KeyboardType.Number, "Verify", { viewModel.submitEmailCode(input.trim()) })
+                            is AuthState.Error -> {
+                                Text(state.message, color = MaterialTheme.colorScheme.error)
+                                AuthField("Phone number", "+1 555 123 4567", input, KeyboardType.Phone, "Try again", { input = it }) { viewModel.submitPhone(input.trim()) }
+                            }
+                            AuthState.Ready -> Unit
+                        }
+                        if (canChangePhone) {
                             TextButton(
                                 onClick = {
-                                    resendNonce += 1
-                                    viewModel.resendCode()
+                                    phoneInput = ""
+                                    showPhoneEditor = true
                                 },
-                                enabled = remainingSeconds == 0,
                                 modifier = Modifier.fillMaxWidth(),
-                            ) {
-                                Text(if (remainingSeconds > 0) "Resend code in ${remainingSeconds}s" else "Resend code")
-                            }
+                            ) { Text("Change phone number") }
                         }
-                        AuthState.WaitPassword -> AuthField("Password", "Two-step password", input, KeyboardType.Password, "Sign in", { input = it }) { viewModel.submitPassword(input) }
-                        AuthState.WaitRegistration -> {
-                            AuthField("First name", "", input, KeyboardType.Text, null, { input = it })
-                            AuthField("Last name (optional)", "", secondInput, KeyboardType.Text, "Create account", { secondInput = it }) { viewModel.register(input.trim(), secondInput.trim()) }
-                        }
-                        AuthState.WaitEmailAddress -> AuthField("Email address", "name@example.com", input, KeyboardType.Email, "Continue", { input = it }) { viewModel.submitEmail(input.trim()) }
-                        AuthState.WaitEmailCode -> AuthField("Email verification code", "12345", input, KeyboardType.Number, "Verify", { input = it }) { viewModel.submitEmailCode(input.trim()) }
-                        is AuthState.Error -> {
-                            Text(state.message, color = MaterialTheme.colorScheme.error)
-                            AuthField("Phone number", "+1 555 123 4567", input, KeyboardType.Phone, "Try again", { input = it }) { viewModel.submitPhone(input.trim()) }
-                        }
-                        AuthState.Ready -> Unit
                     }
                 }
             }
             Text("By continuing, you agree to use Telegram through its official API.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 16.dp))
         }
+    }
+
+    if (showRemoveDialog) {
+        AlertDialog(
+            onDismissRequest = { showRemoveDialog = false },
+            title = { Text("Remove account?") },
+            text = { Text("Remove this unverified account from Chatwave on this device? Your Telegram account itself will not be deleted.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRemoveDialog = false
+                    accountManager.removeAccount(activeAccountId)
+                }) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { showRemoveDialog = false }) { Text("Cancel") } },
+        )
     }
 }
 

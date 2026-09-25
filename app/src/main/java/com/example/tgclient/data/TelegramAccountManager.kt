@@ -2,12 +2,16 @@ package com.example.tgclient.data
 
 import android.content.Context
 import com.example.tgclient.model.AccountSummary
+import com.example.tgclient.security.DatabaseKeyStore
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
+import java.io.File
 import java.util.UUID
 
 /** Owns one isolated TDLib repository per signed-in account. */
@@ -57,6 +61,42 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
         repository(id)
         switchAccount(id)
         return id
+    }
+
+    /** Removes an account from this device; it never deletes the Telegram account itself. */
+    @Synchronized
+    fun removeAccount(accountId: String): Boolean {
+        if (accountId !in accountIds || accountIds.size <= 1) return false
+        val wasActive = _activeAccountId.value == accountId
+        val repository = repositories.remove(accountId)
+        accountIds.remove(accountId)
+        accountLabels.remove(accountId)
+        preferences.edit().remove("label.$accountId").apply()
+        persistAccountIds()
+        _accounts.value = accountIds.mapIndexed(::accountSummary)
+
+        if (wasActive) {
+            val replacement = accountIds.first()
+            repository(replacement)
+            _activeAccountId.value = replacement
+            preferences.edit().putString(ACTIVE_ACCOUNT, replacement).apply()
+        }
+
+        scope.launch(Dispatchers.IO) {
+            repository?.removeFromDevice()
+            clearAccountStorage(accountId)
+        }
+        return true
+    }
+
+    private fun clearAccountStorage(accountId: String) {
+        DatabaseKeyStore(appContext, accountId).clear()
+        val accountRoot = if (accountId == DEFAULT_ACCOUNT_ID) {
+            File(appContext.noBackupFilesDir, "tdlib")
+        } else {
+            File(appContext.noBackupFilesDir, "tdlib/accounts/$accountId")
+        }
+        accountRoot.deleteRecursively()
     }
 
     private fun accountSummary(index: Int, id: String): AccountSummary =

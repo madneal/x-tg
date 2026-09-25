@@ -32,6 +32,9 @@ class DatabaseKeyStore(context: Context, accountId: String = DEFAULT_ACCOUNT_ID)
 
     fun clear() {
         preferences.edit().remove(KEY_VALUE).apply()
+        runCatching {
+            KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }.deleteEntry(keyAlias)
+        }
     }
 
     private fun persist(databaseKey: ByteArray) {

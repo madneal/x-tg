@@ -14,6 +14,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.DataUsage
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Keyboard
@@ -68,6 +69,7 @@ fun SettingsScreen(
     val accounts by accountManager.accounts.collectAsStateWithLifecycle()
     val activeAccount = accounts.firstOrNull { it.id == activeAccountId }
     var showLanguageDialog by remember { mutableStateOf(false) }
+    var accountToRemove by remember { mutableStateOf<com.example.tgclient.model.AccountSummary?>(null) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -100,6 +102,13 @@ fun SettingsScreen(
                             accountManager.switchAccount(account.id)
                             onAccountChanged()
                         },
+                        trailingContent = if (accounts.size > 1) {
+                            {
+                                IconButton(onClick = { accountToRemove = account }) {
+                                    Icon(Icons.Outlined.DeleteOutline, contentDescription = "Remove account", tint = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                        } else null,
                     )
                 }
                 Button(
@@ -190,6 +199,22 @@ fun SettingsScreen(
             confirmButton = { TextButton(onClick = { showLanguageDialog = false }) { Text("Cancel") } },
         )
     }
+
+    accountToRemove?.let { account ->
+        AlertDialog(
+            onDismissRequest = { accountToRemove = null },
+            title = { Text("Remove account?") },
+            text = { Text("Remove ${account.label} from Chatwave on this device? The Telegram account itself will not be deleted.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    accountManager.removeAccount(account.id)
+                    accountToRemove = null
+                    if (account.id == activeAccountId) onAccountChanged()
+                }) { Text("Remove") }
+            },
+            dismissButton = { TextButton(onClick = { accountToRemove = null }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable
@@ -209,12 +234,19 @@ private fun SettingToggle(icon: ImageVector, title: String, supporting: String, 
 }
 
 @Composable
-private fun SettingInfo(icon: ImageVector, title: String, supporting: String, modifier: Modifier = Modifier) {
+private fun SettingInfo(
+    icon: ImageVector,
+    title: String,
+    supporting: String,
+    modifier: Modifier = Modifier,
+    trailingContent: (@Composable (() -> Unit))? = null,
+) {
     ListItem(
         modifier = modifier,
         leadingContent = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
         headlineContent = { Text(title) },
         supportingContent = { Text(supporting) },
+        trailingContent = trailingContent,
     )
     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.24f), modifier = Modifier.padding(start = 72.dp))
 }

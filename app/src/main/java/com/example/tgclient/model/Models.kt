@@ -6,6 +6,9 @@ data class TelegramUser(
     val username: String? = null,
     val phoneNumber: String? = null,
     val avatarFileId: Int? = null,
+    val avatarPath: String? = null,
+    val firstName: String = "",
+    val lastName: String = "",
 )
 
 data class AccountSummary(
@@ -26,6 +29,7 @@ data class ChatSummary(
     val isPinned: Boolean = false,
     val isChannel: Boolean = false,
     val lastMessage: MessageSummary? = null,
+    val photoPath: String? = null,
 )
 
 data class MessageSummary(
@@ -38,6 +42,9 @@ data class MessageSummary(
     val isRead: Boolean = false,
     val mediaType: MediaType? = null,
     val isChannelPost: Boolean = false,
+    val mediaFileId: Int? = null,
+    val mediaPath: String? = null,
+    val mediaName: String? = null,
 )
 
 enum class MediaType { PHOTO, VIDEO, DOCUMENT, AUDIO, VOICE, LOCATION }

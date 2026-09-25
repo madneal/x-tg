@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -132,7 +133,7 @@ fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, on
 private fun ChatRow(chat: ChatSummary, onChatClick: (Long) -> Unit) {
     Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth().clickable { onChatClick(chat.id) }) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-            Avatar(chat.title)
+            Avatar(chat.title, photoPath = chat.photoPath)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -153,12 +154,22 @@ private fun ChatRow(chat: ChatSummary, onChatClick: (Long) -> Unit) {
 }
 
 @Composable
-fun Avatar(title: String, size: Dp = 54.dp) {
+fun Avatar(title: String, size: Dp = 54.dp, photoPath: String? = null) {
     val colors = listOf(Color(0xFF4F9BD5), Color(0xFF63B98D), Color(0xFFE5A84B), Color(0xFFB47BD5), Color(0xFFE27D73))
     val color = colors[title.hashCode().ushr(1) % colors.size]
     val initials = title.trim().split(" ").filter { it.isNotBlank() }.take(2).joinToString("") { it.first().uppercase() }.ifBlank { "C" }
     Box(Modifier.size(size).clip(CircleShape).background(color), contentAlignment = Alignment.Center) {
-        Text(initials, color = Color.White, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+        val bitmap = remember(photoPath) { photoPath?.let(android.graphics.BitmapFactory::decodeFile) }
+        if (bitmap != null) {
+            androidx.compose.foundation.Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = title,
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            Text(initials, color = Color.White, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+        }
     }
 }
 

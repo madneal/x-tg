@@ -36,6 +36,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -48,6 +49,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,6 +77,9 @@ fun SettingsScreen(
     var showLanguageDialog by remember { mutableStateOf(false) }
     var accountToRemove by remember { mutableStateOf<AccountSummary?>(null) }
     var accountSetting by remember { mutableStateOf<AccountSetting?>(null) }
+    var profileFirstName by rememberSaveable(activeAccountId) { mutableStateOf("") }
+    var profileLastName by rememberSaveable(activeAccountId) { mutableStateOf("") }
+    var profileUsername by rememberSaveable(activeAccountId) { mutableStateOf("") }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -91,7 +96,7 @@ fun SettingsScreen(
         ) {
             Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
                 ListItem(
-                    leadingContent = { Avatar("Chatwave", size = 58.dp) },
+                    leadingContent = { Avatar(currentUser?.displayName ?: "Chatwave", size = 58.dp, photoPath = currentUser?.avatarPath) },
                     headlineContent = { Text(activeAccount?.label ?: "Telegram account", style = MaterialTheme.typography.titleLarge) },
                     supportingContent = { Text("Signed in with your Telegram account") },
                 )
@@ -130,7 +135,12 @@ fun SettingsScreen(
                     Icons.Default.AccountCircle,
                     "Profile",
                     "Name, username and profile photo",
-                    modifier = Modifier.clickable { accountSetting = AccountSetting.Profile },
+                    modifier = Modifier.clickable {
+                        profileFirstName = currentUser?.firstName ?: currentUser?.displayName.orEmpty()
+                        profileLastName = currentUser?.lastName.orEmpty()
+                        profileUsername = currentUser?.username.orEmpty()
+                        accountSetting = AccountSetting.Profile
+                    },
                 )
                 SettingInfo(
                     Icons.Default.Lock,
@@ -262,8 +272,50 @@ fun SettingsScreen(
         AlertDialog(
             onDismissRequest = { accountSetting = null },
             title = { Text(title) },
-            text = { Text(body) },
-            confirmButton = { TextButton(onClick = { accountSetting = null }) { Text("Done") } },
+            text = {
+                if (setting == AccountSetting.Profile) {
+                    Column {
+                        OutlinedTextField(
+                            value = profileFirstName,
+                            onValueChange = { profileFirstName = it },
+                            label = { Text("First name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        OutlinedTextField(
+                            value = profileLastName,
+                            onValueChange = { profileLastName = it },
+                            label = { Text("Last name") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        )
+                        OutlinedTextField(
+                            value = profileUsername,
+                            onValueChange = { profileUsername = it.removePrefix("@").replace(" ", "") },
+                            label = { Text("Username") },
+                            prefix = { Text("@") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                        )
+                    }
+                } else {
+                    Text(body)
+                }
+            },
+            confirmButton = {
+                if (setting == AccountSetting.Profile) {
+                    TextButton(
+                        onClick = {
+                            viewModel.updateProfile(profileFirstName.trim(), profileLastName.trim(), profileUsername.trim())
+                            accountSetting = null
+                        },
+                        enabled = profileFirstName.isNotBlank(),
+                    ) { Text("Save") }
+                } else {
+                    TextButton(onClick = { accountSetting = null }) { Text("Done") }
+                }
+            },
+            dismissButton = { TextButton(onClick = { accountSetting = null }) { Text("Cancel") } },
         )
     }
 }

@@ -37,6 +37,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val settingsPreferences = context.getSharedPreferences("chatwave_settings", Context.MODE_PRIVATE)
     private val _settings = MutableStateFlow(loadSettings())
     private val chatCache = ConcurrentHashMap<Long, JSONObject>()
+    private val filePaths = ConcurrentHashMap<Int, String>()
+    private val requestedDownloads = ConcurrentHashMap.newKeySet<Int>()
 
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
     val chats: StateFlow<List<ChatSummary>> = _chats.asStateFlow()
@@ -85,6 +87,14 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     fun changeAuthenticationPhoneNumber(phoneNumber: String) = submitPhoneNumber(phoneNumber)
     fun submitPassword(password: String) = client?.send("checkAuthenticationPassword", JSONObject().put("password", password))
     fun register(firstName: String, lastName: String) = client?.send("registerUser", JSONObject().put("first_name", firstName).put("last_name", lastName))
+
+    suspend fun updateProfile(firstName: String, lastName: String, username: String) {
+        runCatching {
+            client?.request("setName", JSONObject().put("first_name", firstName).put("last_name", lastName))
+            client?.request("setUsername", JSONObject().put("username", username.removePrefix("@")))
+            loadCurrentUser()
+        }
+    }
 
     /** Removes this TDLib session from the device without deleting the Telegram account. */
     suspend fun removeFromDevice() {
@@ -291,14 +301,34 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val chatId = update.optLong("chat_id")
         val messageId = update.optLong("message_id")
         val current = _messages.value[chatId].orEmpty()
-        val replacement = current.firstOrNull { it.id == messageId }?.copy(text = contentText(update.optJSONObject("new_content"))) ?: return
+        val content = update.optJSONObject("new_content") ?: return
+        val type = content.optString("@type")
+        val media = mediaInfo(content, type)
+        media?.fileId?.let(::requestFile)
+        val replacement = current.firstOrNull { it.id == messageId }?.copy(
+            text = contentText(content).ifBlank { mediaLabel(type) },
+            mediaType = media?.type ?: mediaType(type),
+            mediaFileId = media?.fileId,
+            mediaPath = media?.fileId?.let(filePaths::get),
+            mediaName = media?.name,
+        ) ?: return
         _messages.value = _messages.value + (chatId to current.map { if (it.id == messageId) replacement else it })
     }
 
     private fun publishFile(file: JSONObject) {
         val local = file.optJSONObject("local") ?: return
         val id = file.optInt("id")
+        val path = local.optString("path").takeIf { it.isNotBlank() }
+        if (path != null) filePaths[id] = path
         _transfers.value = _transfers.value + (id to TransferState(id, local.optLong("downloaded_size"), file.optLong("size"), local.optBoolean("is_downloading_completed")))
+        publishChats()
+        _currentUser.value?.takeIf { it.avatarFileId == id }?.let { _currentUser.value = it.copy(avatarPath = path ?: it.avatarPath) }
+        _users.value = _users.value.mapValues { (_, user) -> if (user.avatarFileId == id) user.copy(avatarPath = path ?: user.avatarPath) else user }
+        _messages.value = _messages.value.mapValues { (_, messages) ->
+            messages.map { message ->
+                if (message.mediaFileId == id) message.copy(mediaPath = path ?: message.mediaPath) else message
+            }
+        }
     }
 
     private fun publishNotification(update: JSONObject) {
@@ -334,10 +364,23 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     private fun mapUser(user: JSONObject): TelegramUser {
-        val displayName = listOf(user.optString("first_name"), user.optString("last_name")).filter { it.isNotBlank() }.joinToString(" ")
+        val firstName = user.optString("first_name")
+        val lastName = user.optString("last_name")
+        val displayName = listOf(firstName, lastName).filter { it.isNotBlank() }.joinToString(" ")
         val username = user.optString("username").ifBlank { null }
         val phone = user.optString("phone_number").ifBlank { null }
-        return TelegramUser(user.optLong("id"), displayName.ifBlank { username ?: "User" }, username, phone)
+        val avatarFileId = user.optJSONObject("profile_photo")?.optJSONObject("small")?.optInt("id")?.takeIf { it > 0 }
+        avatarFileId?.let(::requestFile)
+        return TelegramUser(
+            id = user.optLong("id"),
+            displayName = displayName.ifBlank { username ?: "User" },
+            username = username,
+            phoneNumber = phone,
+            avatarFileId = avatarFileId,
+            avatarPath = avatarFileId?.let(filePaths::get),
+            firstName = firstName,
+            lastName = lastName,
+        )
     }
 
     private fun mapChat(chat: JSONObject) = ChatSummary(
@@ -348,12 +391,17 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         isPinned = chat.optJSONArray("positions")?.let { positions -> (0 until positions.length()).any { positions.optJSONObject(it)?.optBoolean("is_pinned") == true } } == true,
         isChannel = chat.isChannelChat(),
         lastMessage = chat.optJSONObject("last_message")?.let { mapMessage(it, chat.optLong("id"), chat.isChannelChat()) },
+        photoPath = chat.optJSONObject("photo")?.optJSONObject("small")?.optInt("id")?.takeIf { it > 0 }?.let { fileId ->
+            requestFile(fileId)
+            filePaths[fileId]
+        },
     )
 
     private fun mapMessage(message: JSONObject, parentChatId: Long? = null, channelPost: Boolean = false): MessageSummary? {
         val content = message.optJSONObject("content") ?: return null
         val type = content.optString("@type")
         val text = contentText(content)
+        val media = mediaInfo(content, type)
         // Keep channel posts even when their media type has no text caption
         // (polls, stickers, albums, paid media, and newer TDLib content types).
         if (text.isBlank() && !type.startsWith("message")) return null
@@ -364,7 +412,21 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             "messageSenderChat" -> chatCache[sender.optLong("chat_id")]?.optString("title") ?: "Chat"
             else -> "Unknown"
         }
-        return MessageSummary(message.optLong("id"), chatId, senderName, text.ifBlank { mediaLabel(type) }, message.optInt("date"), message.optBoolean("is_outgoing"), false, mediaType(type), channelPost)
+        media?.fileId?.let(::requestFile)
+        return MessageSummary(
+            id = message.optLong("id"),
+            chatId = chatId,
+            senderName = senderName,
+            text = text.ifBlank { mediaLabel(type) },
+            dateEpochSeconds = message.optInt("date"),
+            isOutgoing = message.optBoolean("is_outgoing"),
+            isRead = false,
+            mediaType = media?.type ?: mediaType(type),
+            isChannelPost = channelPost,
+            mediaFileId = media?.fileId,
+            mediaPath = media?.fileId?.let(filePaths::get),
+            mediaName = media?.name,
+        )
     }
 
     private fun contentText(content: JSONObject?): String {
@@ -380,6 +442,9 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         "messageDocument" -> "Document"
         "messageAudio" -> "Audio"
         "messageVoiceNote" -> "Voice message"
+        "messageLocation" -> "Location"
+        "messageSticker" -> "Sticker"
+        "messageAnimation" -> "Animation"
         else -> "Message"
     }
 
@@ -389,7 +454,36 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         "messageDocument" -> MediaType.DOCUMENT
         "messageAudio" -> MediaType.AUDIO
         "messageVoiceNote" -> MediaType.VOICE
+        "messageLocation" -> MediaType.LOCATION
         else -> null
+    }
+
+    private data class MediaInfo(val type: MediaType, val fileId: Int?, val name: String? = null)
+
+    private fun mediaInfo(content: JSONObject, type: String): MediaInfo? = when (type) {
+        "messagePhoto" -> content.optJSONObject("photo")?.optJSONArray("sizes")?.let { sizes ->
+            val largest = (0 until sizes.length()).mapNotNull { sizes.optJSONObject(it) }.maxByOrNull { it.optInt("width") * it.optInt("height") }
+            MediaInfo(MediaType.PHOTO, largest?.optJSONObject("photo")?.optInt("id")?.takeIf { it > 0 })
+        }
+        "messageVideo" -> MediaInfo(MediaType.VIDEO, content.optJSONObject("video")?.optJSONObject("video")?.optInt("id")?.takeIf { it > 0 })
+        "messageDocument" -> MediaInfo(
+            MediaType.DOCUMENT,
+            content.optJSONObject("document")?.optJSONObject("document")?.optInt("id")?.takeIf { it > 0 },
+            content.optJSONObject("document")?.optString("file_name")?.ifBlank { null },
+        )
+        "messageAudio" -> MediaInfo(
+            MediaType.AUDIO,
+            content.optJSONObject("audio")?.optJSONObject("audio")?.optInt("id")?.takeIf { it > 0 },
+            content.optJSONObject("audio")?.optString("file_name")?.ifBlank { null },
+        )
+        "messageVoiceNote" -> MediaInfo(MediaType.VOICE, content.optJSONObject("voice_note")?.optJSONObject("voice")?.optInt("id")?.takeIf { it > 0 })
+        "messageLocation" -> MediaInfo(MediaType.LOCATION, null)
+        else -> null
+    }
+
+    private fun requestFile(fileId: Int) {
+        if (fileId <= 0 || !requestedDownloads.add(fileId)) return
+        client?.send("downloadFile", JSONObject().put("file_id", fileId).put("priority", 4).put("offset", 0).put("limit", 0).put("synchronous", false))
     }
 
     private fun JSONArray?.toMessageList(chatId: Long, channelPost: Boolean): List<MessageSummary> =

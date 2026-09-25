@@ -37,6 +37,9 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun submitCode(code: String) = repository.submitCode(code)
     fun resendCode() = repository.resendCode()
     fun changeAuthenticationPhoneNumber(phoneNumber: String) = repository.changeAuthenticationPhoneNumber(phoneNumber)
+    fun updateProfile(firstName: String, lastName: String, username: String) = viewModelScope.launch {
+        repository.updateProfile(firstName, lastName, username)
+    }
     fun submitPassword(password: String) = repository.submitPassword(password)
     fun register(firstName: String, lastName: String) = repository.register(firstName, lastName)
     fun logout() = repository.logout()

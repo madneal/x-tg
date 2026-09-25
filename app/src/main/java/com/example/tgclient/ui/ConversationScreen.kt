@@ -3,6 +3,7 @@ package com.example.tgclient.ui
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +32,10 @@ import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -52,11 +57,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.tgclient.model.MediaType
 import com.example.tgclient.model.MessageSummary
 import java.io.File
 import java.text.SimpleDateFormat
@@ -87,7 +95,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Avatar(title, size = 38.dp)
+                        Avatar(title, size = 38.dp, photoPath = chat?.photoPath)
                         Spacer(Modifier.size(10.dp))
                         Column {
                             Text(title, maxLines = 1, fontWeight = FontWeight.SemiBold)
@@ -200,18 +208,63 @@ private fun MessageBubble(message: MessageSummary, mergeWithPrevious: Boolean, m
             horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start,
         ) {
             if (!outgoing && !mergeWithPrevious) Text(message.senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-            Row(verticalAlignment = Alignment.Bottom) {
+            message.mediaType?.let { type ->
+                when (type) {
+                    MediaType.PHOTO -> if (message.mediaPath != null) MediaImage(message.mediaPath) else MediaAttachment("Photo", Icons.Default.InsertDriveFile)
+                    MediaType.VIDEO -> MediaAttachment("Video${message.mediaName?.let { " · $it" }.orEmpty()}", Icons.Default.PlayArrow)
+                    MediaType.DOCUMENT -> MediaAttachment(message.mediaName ?: "Document", Icons.Default.InsertDriveFile)
+                    MediaType.AUDIO -> MediaAttachment(message.mediaName ?: "Audio", Icons.Default.Audiotrack)
+                    MediaType.VOICE -> MediaAttachment("Voice message", Icons.Default.Audiotrack)
+                    MediaType.LOCATION -> MediaAttachment("Location", Icons.Default.LocationOn)
+                }
+            }
+            val mediaPlaceholder = when (message.mediaType) {
+                MediaType.PHOTO -> "Photo"
+                MediaType.VIDEO -> "Video"
+                MediaType.DOCUMENT -> message.mediaName ?: "Document"
+                MediaType.AUDIO -> message.mediaName ?: "Audio"
+                MediaType.VOICE -> "Voice message"
+                MediaType.LOCATION -> "Location"
+                null -> null
+            }
+            if (message.text.isNotBlank() && message.text != mediaPlaceholder) {
                 Text(message.text, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
-                Spacer(Modifier.size(9.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(formatMessageTime(message.dateEpochSeconds), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (outgoing) {
-                        Spacer(Modifier.size(2.dp))
-                        Icon(if (message.isRead) Icons.Default.DoneAll else Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp))
-                    }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.align(if (outgoing) Alignment.End else Alignment.Start)) {
+                Text(formatMessageTime(message.dateEpochSeconds), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (outgoing) {
+                    Spacer(Modifier.size(2.dp))
+                    Icon(if (message.isRead) Icons.Default.DoneAll else Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp))
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun MediaImage(path: String) {
+    val bitmap = remember(path) { android.graphics.BitmapFactory.decodeFile(path) }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "Photo",
+            contentScale = ContentScale.Crop,
+            modifier = Modifier.fillMaxWidth().size(220.dp).clip(RoundedCornerShape(12.dp)),
+        )
+    } else {
+        MediaAttachment("Photo", Icons.Default.InsertDriveFile)
+    }
+}
+
+@Composable
+private fun MediaAttachment(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp))
+        Spacer(Modifier.size(8.dp))
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurface)
     }
 }
 

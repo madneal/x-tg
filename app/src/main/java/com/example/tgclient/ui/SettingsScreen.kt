@@ -55,6 +55,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tgclient.data.TelegramAccountManager
+import com.example.tgclient.model.AccountSummary
+
+private enum class AccountSetting { Profile, PhoneNumber, TwoStepVerification, ActiveSessions }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -68,8 +71,10 @@ fun SettingsScreen(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val accounts by accountManager.accounts.collectAsStateWithLifecycle()
     val activeAccount = accounts.firstOrNull { it.id == activeAccountId }
+    val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
     var showLanguageDialog by remember { mutableStateOf(false) }
-    var accountToRemove by remember { mutableStateOf<com.example.tgclient.model.AccountSummary?>(null) }
+    var accountToRemove by remember { mutableStateOf<AccountSummary?>(null) }
+    var accountSetting by remember { mutableStateOf<AccountSetting?>(null) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -121,10 +126,30 @@ fun SettingsScreen(
             }
 
             SettingsSection("Account") {
-                SettingInfo(Icons.Default.AccountCircle, "Profile", "Name, username and profile photo")
-                SettingInfo(Icons.Default.Lock, "Phone number", "Managed by Telegram")
-                SettingInfo(Icons.Default.Security, "Two-step verification", "Protect your account with an additional password")
-                SettingInfo(Icons.Default.Storage, "Active sessions", "Review devices connected to this account")
+                SettingInfo(
+                    Icons.Default.AccountCircle,
+                    "Profile",
+                    "Name, username and profile photo",
+                    modifier = Modifier.clickable { accountSetting = AccountSetting.Profile },
+                )
+                SettingInfo(
+                    Icons.Default.Lock,
+                    "Phone number",
+                    currentUser?.phoneNumber?.takeIf { it.isNotBlank() }?.let { "+$it" } ?: "Managed by Telegram",
+                    modifier = Modifier.clickable { accountSetting = AccountSetting.PhoneNumber },
+                )
+                SettingInfo(
+                    Icons.Default.Security,
+                    "Two-step verification",
+                    "Protect your account with an additional password",
+                    modifier = Modifier.clickable { accountSetting = AccountSetting.TwoStepVerification },
+                )
+                SettingInfo(
+                    Icons.Default.Storage,
+                    "Active sessions",
+                    "Review devices connected to this account",
+                    modifier = Modifier.clickable { accountSetting = AccountSetting.ActiveSessions },
+                )
             }
 
             SettingsSection("Appearance") {
@@ -213,6 +238,32 @@ fun SettingsScreen(
                 }) { Text("Remove") }
             },
             dismissButton = { TextButton(onClick = { accountToRemove = null }) { Text("Cancel") } },
+        )
+    }
+
+    accountSetting?.let { setting ->
+        val title = when (setting) {
+            AccountSetting.Profile -> "Profile"
+            AccountSetting.PhoneNumber -> "Phone number"
+            AccountSetting.TwoStepVerification -> "Two-step verification"
+            AccountSetting.ActiveSessions -> "Active sessions"
+        }
+        val body = when (setting) {
+            AccountSetting.Profile -> buildString {
+                append("Name: ")
+                append(currentUser?.displayName ?: activeAccount?.label ?: "Telegram account")
+                currentUser?.username?.takeIf { it.isNotBlank() }?.let { append("\nUsername: @").append(it) }
+            }
+            AccountSetting.PhoneNumber -> currentUser?.phoneNumber?.takeIf { it.isNotBlank() }?.let { "Phone number: +$it" }
+                ?: "Telegram manages this phone number."
+            AccountSetting.TwoStepVerification -> "Two-step verification is managed by Telegram for this account."
+            AccountSetting.ActiveSessions -> "Your Telegram sessions are managed by Telegram and TDLib."
+        }
+        AlertDialog(
+            onDismissRequest = { accountSetting = null },
+            title = { Text(title) },
+            text = { Text(body) },
+            confirmButton = { TextButton(onClick = { accountSetting = null }) { Text("Done") } },
         )
     }
 }

@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.tgclient.data.TelegramRepository
 import com.example.tgclient.model.AuthState
 import com.example.tgclient.model.MessageEntity
+import com.example.tgclient.model.MediaType
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -64,6 +65,8 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun sendLocalMedia(chatId: Long, path: String, mimeType: String, caption: String = "", replyToMessageId: Long? = null) =
         repository.sendLocalMedia(chatId, path, mimeType, caption = caption, replyToMessageId = replyToMessageId)
     fun downloadFile(fileId: Int) = repository.downloadFile(fileId)
+    fun saveMediaToGallery(fileId: Int, mediaType: MediaType, fileName: String? = null, localPath: String? = null) =
+        repository.saveMediaToGallery(fileId, mediaType, fileName, localPath)
     fun createChatFolder(title: String) = repository.createChatFolder(title)
     fun renameChatFolder(folderId: String, title: String) = repository.renameChatFolder(folderId, title)
     fun deleteChatFolder(folderId: String) = repository.deleteChatFolder(folderId)

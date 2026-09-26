@@ -1,5 +1,6 @@
 package com.example.tgclient.ui
 
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -88,6 +89,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.core.content.FileProvider
 import com.example.tgclient.model.MediaType
 import com.example.tgclient.model.MessageEntity
 import com.example.tgclient.model.MessageSummary
@@ -468,6 +470,31 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
             text = {
                 Column {
                     Text(messageAnnotatedString(target), style = MaterialTheme.typography.bodyMedium, maxLines = 3)
+                    target.mediaFileId?.let { fileId ->
+                        val mediaType = target.mediaType ?: MediaType.DOCUMENT
+                        TextButton(
+                            onClick = {
+                                viewModel.saveMediaToGallery(fileId, mediaType, target.mediaName, target.mediaPath)
+                                selectedMessage = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(if (target.mediaPath != null) "Save to device" else "Download and save")
+                        }
+                        TextButton(
+                            onClick = {
+                                if (target.mediaPath != null) {
+                                    shareMedia(context, target.mediaPath, mediaType)
+                                } else {
+                                    viewModel.downloadFile(fileId)
+                                }
+                                selectedMessage = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(if (target.mediaPath != null) "Share / export" else "Download media")
+                        }
+                    }
                     TextButton(
                         onClick = {
                             replyTarget = target
@@ -583,6 +610,36 @@ private fun android.net.Uri.copyToCache(context: android.content.Context): Strin
     context.contentResolver.openInputStream(this)?.use { input -> target.outputStream().use(input::copyTo) }
     target.absolutePath
 }.getOrNull()
+
+private fun shareMedia(context: android.content.Context, path: String, mediaType: MediaType) {
+    val source = File(path).takeIf { it.isFile } ?: return
+    runCatching {
+        val shareDirectory = File(context.cacheDir, "shared_media").apply { mkdirs() }
+        val extension = source.extension.takeIf { it.isNotBlank() } ?: when (mediaType) {
+            MediaType.PHOTO -> "jpg"
+            MediaType.VIDEO -> "mp4"
+            MediaType.AUDIO, MediaType.VOICE -> "mp3"
+            else -> "bin"
+        }
+        val copy = File.createTempFile("chatwave_share_", ".${extension}", shareDirectory)
+        source.copyTo(copy, overwrite = true)
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", copy)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mediaMimeType(mediaType)
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "Share media").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+}
+
+private fun mediaMimeType(mediaType: MediaType): String = when (mediaType) {
+    MediaType.PHOTO -> "image/*"
+    MediaType.VIDEO -> "video/*"
+    MediaType.AUDIO, MediaType.VOICE -> "audio/*"
+    MediaType.DOCUMENT -> "application/octet-stream"
+    MediaType.LOCATION -> "text/plain"
+}
 
 private data class PendingMedia(
     val path: String,

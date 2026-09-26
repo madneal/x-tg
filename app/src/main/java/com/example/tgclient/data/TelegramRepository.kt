@@ -1,6 +1,8 @@
 package com.example.tgclient.data
 
+import android.content.ContentValues
 import android.content.Context
+import android.provider.MediaStore
 import com.example.tgclient.BuildConfig
 import com.example.tgclient.model.AppSettings
 import com.example.tgclient.model.AuthAction
@@ -30,11 +32,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
 
 class TelegramRepository(context: Context, scope: CoroutineScope, val accountId: String = DEFAULT_ACCOUNT_ID) {
+    private val appContext = context.applicationContext
     private val repositoryScope = scope
     private val client: TdLibClient?
     private val notificationController = TelegramNotificationController(context)
@@ -59,6 +63,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val chatCache = ConcurrentHashMap<Long, JSONObject>()
     private val filePaths = ConcurrentHashMap<Int, String>()
     private val requestedDownloads = ConcurrentHashMap.newKeySet<Int>()
+    private val pendingGallerySaves = ConcurrentHashMap<Int, GallerySaveRequest>()
+    private val savedGalleryFiles = ConcurrentHashMap.newKeySet<Int>()
     private val requestedUsers = ConcurrentHashMap.newKeySet<Long>()
     private val localPinOverrides = ConcurrentHashMap<Long, Boolean>()
 
@@ -348,6 +354,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 pageCount += 1
             }
             if (_settings.value.retainDeletedMessages) loaded.forEach(messageRetentionStore::save)
+            if (_settings.value.saveToGallery) loaded.forEach(::maybeAutoSaveMedia)
             val merged = mergeMessages(_messages.value[chatId].orEmpty(), loaded)
             val retained = if (_settings.value.retainDeletedMessages) messageRetentionStore.loadChat(chatId) else emptyList()
             _messages.value = _messages.value + (chatId to mergeMessages(merged, retained))
@@ -560,7 +567,26 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         )
     }
 
-    fun downloadFile(fileId: Int, priority: Int = 16) = client?.send("downloadFile", JSONObject().put("file_id", fileId).put("priority", priority).put("offset", 0).put("limit", 0).put("synchronous", false))
+    /** Starts a user-requested download even when automatic media downloads are disabled. */
+    fun downloadFile(fileId: Int, priority: Int = 16) {
+        if (fileId <= 0) return
+        requestedDownloads.remove(fileId)
+        requestFile(fileId, priority = priority, respectAutoDownload = false)
+    }
+
+    /** Saves a downloaded media file to Gallery or Downloads, requesting it first when needed. */
+    fun saveMediaToGallery(fileId: Int, mediaType: MediaType, fileName: String? = null, localPath: String? = null) {
+        if (fileId <= 0) return
+        val request = GallerySaveRequest(mediaType, fileName)
+        val path = (localPath ?: filePaths[fileId])?.let(::File)?.takeIf { it.isFile }?.absolutePath
+        if (path != null) {
+            saveLocalFileToMediaStore(fileId, path, request)
+        } else {
+            pendingGallerySaves[fileId] = request
+            downloadFile(fileId)
+        }
+    }
+
     fun cancelDownload(fileId: Int) = client?.send("cancelDownloadFile", JSONObject().put("file_id", fileId).put("only_pending", false))
 
     suspend fun searchMessages(query: String, limit: Int = 50): List<MessageSummary> = runCatching {
@@ -579,10 +605,14 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
-        val updated = transform(_settings.value)
+        val previous = _settings.value
+        val updated = transform(previous)
         _settings.value = updated
         if (!updated.retainDeletedMessages) {
             _messages.value = _messages.value.mapValues { (_, messages) -> messages.filterNot { it.isDeleted } }
+        }
+        if (updated.saveToGallery && !previous.saveToGallery) {
+            _messages.value.values.flatten().forEach(::maybeAutoSaveMedia)
         }
         settingsPreferences.edit()
             .putBoolean("darkTheme", updated.darkTheme)
@@ -666,6 +696,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val isChannel = chatCache[chatId]?.isChannelChat() == true
         val mapped = mapMessage(message, chatId, isChannel) ?: return
         if (_settings.value.retainDeletedMessages) messageRetentionStore.save(mapped)
+        maybeAutoSaveMedia(mapped)
         val current = _messages.value[chatId].orEmpty()
         _messages.value = _messages.value + (chatId to mergeMessages(current, listOf(mapped)))
     }
@@ -693,6 +724,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             entities = entities,
         ) ?: return
         if (_settings.value.retainDeletedMessages) messageRetentionStore.save(replacement)
+        maybeAutoSaveMedia(replacement)
         _messages.value = _messages.value + (chatId to current.map { if (it.id == messageId) replacement else it })
     }
 
@@ -732,6 +764,14 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             }
         }
         if (_settings.value.retainDeletedMessages && path != null) messageRetentionStore.updateMediaPath(id, path)
+        if (local.optBoolean("is_downloading_completed") && path != null) {
+            pendingGallerySaves.remove(id)?.let { request -> saveLocalFileToMediaStore(id, path, request) }
+            if (_settings.value.saveToGallery) {
+                _messages.value.values.flatten()
+                    .filter { it.mediaFileId == id }
+                    .forEach(::maybeAutoSaveMedia)
+            }
+        }
     }
 
     private fun publishNotification(update: JSONObject) {
@@ -925,6 +965,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
 
     private data class MediaInfo(val type: MediaType, val fileId: Int?, val name: String? = null)
 
+    private data class GallerySaveRequest(val mediaType: MediaType, val fileName: String?)
+
     private fun mediaInfo(content: JSONObject, type: String): MediaInfo? = when (type) {
         "messagePhoto" -> content.optJSONObject("photo")?.optJSONArray("sizes")?.let { sizes ->
             val largest = (0 until sizes.length()).mapNotNull { sizes.optJSONObject(it) }.maxByOrNull { it.optInt("width") * it.optInt("height") }
@@ -954,6 +996,52 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         }
         client?.send("downloadFile", JSONObject().put("file_id", fileId).put("priority", priority).put("offset", 0).put("limit", 0).put("synchronous", false))
     }
+
+    private fun maybeAutoSaveMedia(message: MessageSummary) {
+        if (!_settings.value.saveToGallery) return
+        val mediaType = message.mediaType?.takeIf { it == MediaType.PHOTO || it == MediaType.VIDEO } ?: return
+        val fileId = message.mediaFileId ?: return
+        saveMediaToGallery(fileId, mediaType, message.mediaName, message.mediaPath)
+    }
+
+    private fun saveLocalFileToMediaStore(fileId: Int, path: String, request: GallerySaveRequest) {
+        if (!savedGalleryFiles.add(fileId)) return
+        val (collection, relativePath, mimeType, defaultExtension) = when (request.mediaType) {
+            MediaType.PHOTO -> Quadruple(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "Pictures/Chatwave", "image/jpeg", "jpg")
+            MediaType.VIDEO -> Quadruple(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "Movies/Chatwave", "video/mp4", "mp4")
+            MediaType.DOCUMENT -> Quadruple(MediaStore.Downloads.EXTERNAL_CONTENT_URI, "Download/Chatwave", "application/octet-stream", "bin")
+            MediaType.AUDIO, MediaType.VOICE -> Quadruple(MediaStore.Downloads.EXTERNAL_CONTENT_URI, "Download/Chatwave", "audio/mpeg", "mp3")
+            MediaType.LOCATION -> {
+                savedGalleryFiles.remove(fileId)
+                return
+            }
+        }
+        val displayName = request.fileName?.takeIf { it.isNotBlank() }?.replace(Regex("[\\r\\n/]"), "_")
+            ?: "chatwave_${fileId}.$defaultExtension"
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val resolver = appContext.contentResolver
+        val uri = runCatching { resolver.insert(collection, values) }.getOrNull()
+        if (uri == null) {
+            savedGalleryFiles.remove(fileId)
+            return
+        }
+        runCatching {
+            resolver.openOutputStream(uri, "w")?.use { output ->
+                File(path).inputStream().use { input -> input.copyTo(output) }
+            } ?: error("Unable to open media destination")
+            resolver.update(uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+        }.onFailure {
+            resolver.delete(uri, null, null)
+            savedGalleryFiles.remove(fileId)
+        }
+    }
+
+    private data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
     private fun JSONArray?.toMessageList(chatId: Long, channelPost: Boolean): List<MessageSummary> =
         if (this == null) emptyList() else (0 until length()).mapNotNull { mapMessage(optJSONObject(it) ?: JSONObject(), chatId, channelPost) }

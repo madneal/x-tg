@@ -77,12 +77,17 @@ import java.util.Locale
 fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, onChatClick: (Long) -> Unit) {
     val chats by viewModel.chats.collectAsStateWithLifecycle()
     val folders by viewModel.chatFolders.collectAsStateWithLifecycle()
+    val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
     var searchVisible by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var selectedFolderId by rememberSaveable { mutableStateOf("all") }
     var showFolderManager by remember { mutableStateOf(false) }
     var chatForLabels by remember { mutableStateOf<ChatSummary?>(null) }
     val selectedFolder = folders.firstOrNull { it.id == selectedFolderId } ?: folders.firstOrNull()
+    val accountName = currentUser?.displayName?.takeIf { it.isNotBlank() && it != "User" }
+        ?: currentUser?.username?.takeIf { it.isNotBlank() }?.let { "@$it" }
+        ?: "Telegram account"
+    val accountSubtitle = currentUser?.username?.takeIf { it.isNotBlank() }?.let { "@$it" } ?: "Telegram account"
     val folderChats = remember(chats, selectedFolder) {
         if (selectedFolder == null || selectedFolder.isAllChats) chats else chats.filter { it.id in selectedFolder.chatIds }
     }
@@ -99,11 +104,11 @@ fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, on
                 modifier = Modifier.shadow(1.dp),
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Avatar(title = "Chatwave", size = 38.dp)
+                        Avatar(title = accountName, size = 38.dp, photoPath = currentUser?.avatarPath)
                         Spacer(Modifier.width(10.dp))
                         Column {
-                            Text("Chatwave", fontWeight = FontWeight.SemiBold)
-                            Text("Telegram messenger", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(accountName, maxLines = 1, fontWeight = FontWeight.SemiBold)
+                            Text(accountSubtitle, maxLines = 1, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 },

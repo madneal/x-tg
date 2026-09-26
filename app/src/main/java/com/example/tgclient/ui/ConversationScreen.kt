@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -85,9 +86,11 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     val chats by viewModel.chats.collectAsStateWithLifecycle()
     val users by viewModel.users.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val groupActivity by viewModel.groupActivity.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var draft by remember { mutableStateOf("") }
     var showChatMenu by remember { mutableStateOf(false) }
+    var showActivityDialog by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
     var confirmClearHistory by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -154,6 +157,16 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                                     confirmClearHistory = true
                                 },
                             )
+                            if (chat?.isGroup == true) {
+                                DropdownMenuItem(
+                                    text = { Text("Member activity (24h)") },
+                                    onClick = {
+                                        showChatMenu = false
+                                        showActivityDialog = true
+                                        viewModel.loadGroupActivityStats(chatId)
+                                    },
+                                )
+                            }
                             if (chat?.isGroup == true || chat?.isChannel == true) {
                                 DropdownMenuItem(
                                     text = { Text(if (chat.isChannel) "Leave channel" else "Leave group") },
@@ -272,6 +285,47 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                     },
                 ) { Text("Leave") }
             },
+        )
+    }
+
+    if (showActivityDialog) {
+        val activity = groupActivity[chatId]
+        AlertDialog(
+            onDismissRequest = { showActivityDialog = false },
+            title = { Text("Top speakers · 24h") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    when {
+                        activity?.isLoading == true -> {
+                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                            }
+                        }
+                        activity?.error != null -> Text(activity.error, color = MaterialTheme.colorScheme.error)
+                        activity?.topUsers.isNullOrEmpty() -> Text(
+                            "No user messages in the last 24 hours.",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        else -> activity?.topUsers.orEmpty().forEachIndexed { index, speaker ->
+                            val user = users[speaker.userId]
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("${index + 1}", modifier = Modifier.widthIn(min = 22.dp), fontWeight = FontWeight.Bold)
+                                Avatar(
+                                    title = user?.displayName ?: speaker.displayName,
+                                    size = 36.dp,
+                                    photoPath = user?.avatarPath,
+                                )
+                                Spacer(Modifier.size(8.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(user?.displayName ?: speaker.displayName, maxLines = 1, fontWeight = FontWeight.SemiBold)
+                                    Text("${speaker.messageCount} messages", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { showActivityDialog = false }) { Text("Close") } },
         )
     }
 }

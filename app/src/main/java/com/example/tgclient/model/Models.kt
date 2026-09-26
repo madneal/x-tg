@@ -110,3 +110,15 @@ data class TransferState(
     val isCompleted: Boolean = false,
     val error: String? = null,
 )
+
+data class GroupSpeakerStat(
+    val userId: Long,
+    val displayName: String,
+    val messageCount: Int,
+)
+
+data class GroupActivityState(
+    val isLoading: Boolean = false,
+    val topUsers: List<GroupSpeakerStat> = emptyList(),
+    val error: String? = null,
+)

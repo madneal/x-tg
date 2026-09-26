@@ -21,6 +21,7 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     val currentUser = repository.currentUser
     val verification = repository.verification
     val authAction = repository.authAction
+    val groupActivity = repository.groupActivity
 
     val ready: StateFlow<Boolean> = authState
         .combine(repository.chats) { auth, _ -> auth is AuthState.Ready }
@@ -48,6 +49,7 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun logout() = repository.logout()
     fun openChat(chatId: Long) = viewModelScope.launch { repository.loadMessages(chatId) }
     fun closeChat(chatId: Long) = repository.closeChat(chatId)
+    fun loadGroupActivityStats(chatId: Long) = viewModelScope.launch { repository.loadGroupActivityStats(chatId) }
     fun sendMessage(chatId: Long, text: String) = repository.sendText(chatId, text)
     fun sendLocalMedia(chatId: Long, path: String, mimeType: String) = repository.sendLocalMedia(chatId, path, mimeType)
     fun createChatFolder(title: String) = repository.createChatFolder(title)

@@ -7,6 +7,8 @@ import com.example.tgclient.model.AuthAction
 import com.example.tgclient.model.AuthState
 import com.example.tgclient.model.ChatFolder
 import com.example.tgclient.model.ChatSummary
+import com.example.tgclient.model.GroupActivityState
+import com.example.tgclient.model.GroupSpeakerStat
 import com.example.tgclient.model.MediaType
 import com.example.tgclient.model.MessageSummary
 import com.example.tgclient.model.TelegramUser
@@ -43,6 +45,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val _authAction = MutableStateFlow(AuthAction.None)
     private val authActionGuard = AtomicReference(AuthAction.None)
     private val authStateVersion = MutableStateFlow(0L)
+    private val _groupActivity = MutableStateFlow<Map<Long, GroupActivityState>>(emptyMap())
     private val _transfers = MutableStateFlow<Map<Int, TransferState>>(emptyMap())
     private val settingsPreferences = context.getSharedPreferences("chatwave_settings", Context.MODE_PRIVATE)
     private val folderPreferences = context.getSharedPreferences("chatwave_chat_folders_$accountId", Context.MODE_PRIVATE)
@@ -61,6 +64,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     val currentUser: StateFlow<TelegramUser?> = _currentUser.asStateFlow()
     val verification: StateFlow<VerificationCodeState> = _verification.asStateFlow()
     val authAction: StateFlow<AuthAction> = _authAction.asStateFlow()
+    val groupActivity: StateFlow<Map<Long, GroupActivityState>> = _groupActivity.asStateFlow()
     val transfers: StateFlow<Map<Int, TransferState>> = _transfers.asStateFlow()
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
     val chatFolders: StateFlow<List<ChatFolder>> = _chatFolders.asStateFlow()
@@ -303,6 +307,64 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
 
     fun closeChat(chatId: Long) {
         client?.send("closeChat", JSONObject().put("chat_id", chatId))
+    }
+
+    suspend fun loadGroupActivityStats(chatId: Long) {
+        if (_groupActivity.value[chatId]?.isLoading == true) return
+        _groupActivity.value = _groupActivity.value + (chatId to GroupActivityState(isLoading = true))
+        try {
+            val cutoff = System.currentTimeMillis() / 1000L - ACTIVITY_WINDOW_SECONDS
+            val counts = mutableMapOf<Long, Int>()
+            var fromMessageId = 0L
+            var reachedCutoff = false
+            var pages = 0
+            while (!reachedCutoff && pages < MAX_ACTIVITY_PAGES) {
+                val result = client?.request(
+                    "getChatHistory",
+                    JSONObject()
+                        .put("chat_id", chatId)
+                        .put("from_message_id", fromMessageId)
+                        .put("offset", 0)
+                        .put("limit", 100)
+                        .put("only_local", false),
+                ) ?: break
+                val messages = result.optJSONArray("messages") ?: break
+                if (messages.length() == 0) break
+                for (index in 0 until messages.length()) {
+                    val message = messages.optJSONObject(index) ?: continue
+                    val messageDate = message.optLong("date")
+                    if (messageDate in 1 until cutoff) {
+                        reachedCutoff = true
+                        break
+                    }
+                    if (messageDate < cutoff || !message.isCountableActivityMessage()) continue
+                    val sender = message.optJSONObject("sender_id") ?: continue
+                    if (sender.optString("@type") != "messageSenderUser") continue
+                    val userId = sender.optLong("user_id").takeIf { it > 0L } ?: continue
+                    requestUser(userId)
+                    counts[userId] = (counts[userId] ?: 0) + 1
+                }
+                val lastMessageId = messages.optJSONObject(messages.length() - 1)?.optLong("id") ?: 0L
+                if (lastMessageId <= 0L || lastMessageId == fromMessageId) break
+                fromMessageId = lastMessageId
+                pages += 1
+            }
+            val topUsers = counts.entries
+                .sortedWith(compareByDescending<Map.Entry<Long, Int>> { it.value }.thenBy { it.key })
+                .take(5)
+                .map { (userId, count) ->
+                    GroupSpeakerStat(
+                        userId = userId,
+                        displayName = _users.value[userId]?.displayName ?: "User $userId",
+                        messageCount = count,
+                    )
+                }
+            _groupActivity.value = _groupActivity.value + (chatId to GroupActivityState(topUsers = topUsers))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            _groupActivity.value = _groupActivity.value + (chatId to GroupActivityState(error = error.safeMessage()))
+        }
     }
 
     fun sendText(chatId: Long, text: String, replyToMessageId: Long? = null) {
@@ -699,6 +761,11 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private fun JSONObject.isPrivateChat(): Boolean =
         optJSONObject("type")?.optString("@type") == "chatTypePrivate"
 
+    private fun JSONObject.isCountableActivityMessage(): Boolean {
+        val type = optJSONObject("content")?.optString("@type") ?: return false
+        return type.startsWith("message") && !type.startsWith("messageChat") && type !in NON_ACTIVITY_MESSAGE_TYPES
+    }
+
     private fun loadChatFolders(): List<ChatFolder> {
         val custom = folderPreferences.getString(FOLDER_IDS_KEY, null)
             ?.split(',')
@@ -737,5 +804,14 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         const val FOLDER_NAME_PREFIX = "folder_name."
         const val FOLDER_CHATS_PREFIX = "folder_chats."
         const val AUTH_ACTION_TIMEOUT_MS = 15_000L
+        const val ACTIVITY_WINDOW_SECONDS = 24 * 60 * 60L
+        const val MAX_ACTIVITY_PAGES = 200
+        val NON_ACTIVITY_MESSAGE_TYPES = setOf(
+            "messageCall",
+            "messagePinMessage",
+            "messageScreenshotTaken",
+            "messageVideoChatStarted",
+            "messageVideoChatEnded",
+        )
     }
 }

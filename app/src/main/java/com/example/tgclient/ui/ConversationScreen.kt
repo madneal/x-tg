@@ -83,6 +83,7 @@ import java.util.Locale
 fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () -> Unit) {
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val chats by viewModel.chats.collectAsStateWithLifecycle()
+    val users by viewModel.users.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var draft by remember { mutableStateOf("") }
@@ -226,7 +227,13 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                 verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
                 itemsIndexed(chatMessages, key = { _, message -> message.id }) { _, message ->
-                    MessageBubble(message, mergeWithPrevious = false, mergeWithNext = false)
+                    MessageBubble(
+                        message = message,
+                        mergeWithPrevious = false,
+                        mergeWithNext = false,
+                        showSenderAvatar = chat?.isGroup == true,
+                        senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
+                    )
                 }
             }
         }
@@ -276,7 +283,13 @@ private fun android.net.Uri.copyToCache(context: android.content.Context): Strin
 }.getOrNull()
 
 @Composable
-private fun MessageBubble(message: MessageSummary, mergeWithPrevious: Boolean, mergeWithNext: Boolean) {
+private fun MessageBubble(
+    message: MessageSummary,
+    mergeWithPrevious: Boolean,
+    mergeWithNext: Boolean,
+    showSenderAvatar: Boolean,
+    senderAvatarPath: String?,
+) {
     val outgoing = message.isOutgoing
     val bubbleColor = if (outgoing) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
     val shape = if (outgoing) {
@@ -294,7 +307,15 @@ private fun MessageBubble(message: MessageSummary, mergeWithPrevious: Boolean, m
             bottomEnd = 18.dp,
         )
     }
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = if (outgoing) Arrangement.End else Arrangement.Start) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (outgoing) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Bottom,
+    ) {
+        if (!outgoing && showSenderAvatar) {
+            Avatar(message.senderName, size = 32.dp, photoPath = senderAvatarPath)
+            Spacer(Modifier.size(6.dp))
+        }
         Column(
             modifier = Modifier.widthIn(max = 330.dp).clip(shape).background(bubbleColor).padding(horizontal = 11.dp, vertical = 7.dp),
             horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start,

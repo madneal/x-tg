@@ -59,6 +59,7 @@ data class MessageSummary(
     val id: Long,
     val chatId: Long,
     val senderName: String,
+    val senderUserId: Long? = null,
     val text: String,
     val dateEpochSeconds: Int = 0,
     val isOutgoing: Boolean = false,

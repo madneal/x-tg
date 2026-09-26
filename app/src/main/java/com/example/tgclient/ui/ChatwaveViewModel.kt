@@ -15,6 +15,7 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     val authState = repository.authState
     val chats = repository.chats
     val messages = repository.messages
+    val users = repository.users
     val settings = repository.settings
     val chatFolders = repository.chatFolders
     val currentUser = repository.currentUser

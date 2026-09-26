@@ -51,6 +51,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val chatCache = ConcurrentHashMap<Long, JSONObject>()
     private val filePaths = ConcurrentHashMap<Int, String>()
     private val requestedDownloads = ConcurrentHashMap.newKeySet<Int>()
+    private val requestedUsers = ConcurrentHashMap.newKeySet<Long>()
     private val localPinOverrides = ConcurrentHashMap<Long, Boolean>()
 
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
@@ -518,8 +519,18 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
 
     private fun updateUser(user: JSONObject) {
         val mapped = mapUser(user)
+        requestedUsers.remove(mapped.id)
         _users.value = _users.value + (mapped.id to mapped)
         if (_currentUser.value?.id == mapped.id) _currentUser.value = mapped
+    }
+
+    private fun requestUser(userId: Long) {
+        if (userId <= 0L || _users.value.containsKey(userId) || !requestedUsers.add(userId)) return
+        repositoryScope.launch {
+            runCatching { client?.request("getUser", JSONObject().put("user_id", userId)) }
+                .onSuccess { user -> if (user != null && user.optLong("id") == userId) updateUser(user) }
+                .onFailure { requestedUsers.remove(userId) }
+        }
     }
 
     private suspend fun loadCurrentUser() {
@@ -578,6 +589,10 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         if (text.isBlank() && !type.startsWith("message")) return null
         val chatId = message.optLong("chat_id").takeIf { it != 0L } ?: parentChatId ?: return null
         val sender = message.optJSONObject("sender_id")
+        val senderUserId = sender?.takeIf { it.optString("@type") == "messageSenderUser" }
+            ?.optLong("user_id")
+            ?.takeIf { it > 0L }
+        senderUserId?.let(::requestUser)
         val senderName = when (sender?.optString("@type")) {
             "messageSenderUser" -> _users.value[sender.optLong("user_id")]?.displayName ?: "User ${sender.optLong("user_id")}"
             "messageSenderChat" -> chatCache[sender.optLong("chat_id")]?.optString("title") ?: "Chat"
@@ -588,6 +603,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             id = message.optLong("id"),
             chatId = chatId,
             senderName = senderName,
+            senderUserId = senderUserId,
             text = text.ifBlank { mediaLabel(type) },
             dateEpochSeconds = message.optInt("date"),
             isOutgoing = message.optBoolean("is_outgoing"),

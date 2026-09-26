@@ -278,6 +278,11 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
 
     suspend fun loadMessages(chatId: Long, limit: Int = 50) {
         runCatching {
+            // Supergroups and channels only receive their full chat updates
+            // after the chat has been opened. Open it before requesting the
+            // history so group conversations are hydrated from TDLib rather
+            // than relying on the cached last message.
+            client?.request("openChat", JSONObject().put("chat_id", chatId))
             // Fetch the chat object before its history. This is important for
             // channels because TDLib describes them as chatTypeSupergroup with
             // is_channel=true, rather than using a separate chat type.
@@ -293,6 +298,10 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 _messages.value = _messages.value + (chatId to merged)
             }
         }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+    }
+
+    fun closeChat(chatId: Long) {
+        client?.send("closeChat", JSONObject().put("chat_id", chatId))
     }
 
     fun sendText(chatId: Long, text: String, replyToMessageId: Long? = null) {

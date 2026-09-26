@@ -46,6 +46,7 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun register(firstName: String, lastName: String) = repository.register(firstName, lastName)
     fun logout() = repository.logout()
     fun openChat(chatId: Long) = viewModelScope.launch { repository.loadMessages(chatId) }
+    fun closeChat(chatId: Long) = repository.closeChat(chatId)
     fun sendMessage(chatId: Long, text: String) = repository.sendText(chatId, text)
     fun sendLocalMedia(chatId: Long, path: String, mimeType: String) = repository.sendLocalMedia(chatId, path, mimeType)
     fun createChatFolder(title: String) = repository.createChatFolder(title)

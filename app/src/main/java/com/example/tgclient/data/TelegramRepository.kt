@@ -407,16 +407,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             .put("text", formattedText(text, entities))
             .put("link_preview_options", if (_settings.value.linkPreviews) JSONObject.NULL else JSONObject().put("@type", "linkPreviewOptions").put("is_disabled", true))
             .put("clear_draft", true)
-        client?.send(
-            "sendMessage",
-            JSONObject()
-                .put("chat_id", chatId)
-                .put("topic_id", JSONObject.NULL)
-                .put("reply_to", replyToMessageId?.let { JSONObject().put("@type", "inputMessageReplyToMessage").put("message_id", it).put("quote", JSONObject.NULL).put("checklist_task_id", 0) } ?: JSONObject.NULL)
-                .put("options", JSONObject.NULL)
-                .put("reply_markup", JSONObject.NULL)
-                .put("input_message_content", content),
-        )
+        sendContent(chatId, content, replyToMessageId)
     }
 
     fun editMessageText(chatId: Long, messageId: Long, text: String, entities: List<MessageEntity>) {
@@ -479,7 +470,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         )
     }
 
-    fun sendLocalMedia(chatId: Long, path: String, mimeType: String, caption: String = "") {
+    fun sendLocalMedia(chatId: Long, path: String, mimeType: String, caption: String = "", replyToMessageId: Long? = null) {
         val inputFile = JSONObject().put("@type", "inputFileLocal").put("path", path)
         val formattedCaption = JSONObject().put("@type", "formattedText").put("text", caption).put("entities", JSONArray())
         val content = when {
@@ -523,9 +514,30 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 .put("disable_content_type_detection", false)
                 .put("caption", formattedCaption)
         }
+        sendContent(chatId, content, replyToMessageId)
+    }
+
+    /** Sends any supported content and keeps the reply metadata identical for text and media. */
+    private fun sendContent(chatId: Long, content: JSONObject, replyToMessageId: Long?) {
+        val replyTo = replyToMessageId
+            ?.takeIf { it > 0L }
+            ?.let {
+                JSONObject()
+                    .put("@type", "inputMessageReplyToMessage")
+                    .put("message_id", it)
+                    .put("quote", JSONObject.NULL)
+                    .put("checklist_task_id", 0)
+            }
+            ?: JSONObject.NULL
         client?.send(
             "sendMessage",
-            JSONObject().put("chat_id", chatId).put("topic_id", JSONObject.NULL).put("reply_to", JSONObject.NULL).put("options", JSONObject.NULL).put("reply_markup", JSONObject.NULL).put("input_message_content", content),
+            JSONObject()
+                .put("chat_id", chatId)
+                .put("topic_id", JSONObject.NULL)
+                .put("reply_to", replyTo)
+                .put("options", JSONObject.NULL)
+                .put("reply_markup", JSONObject.NULL)
+                .put("input_message_content", content),
         )
     }
 

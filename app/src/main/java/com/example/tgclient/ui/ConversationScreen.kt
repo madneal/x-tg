@@ -142,7 +142,18 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         val path = uri.copyToCache(context)
-        if (path != null) viewModel.sendLocalMedia(chatId, path, context.contentResolver.getType(uri) ?: "application/octet-stream")
+        if (path != null) {
+            viewModel.sendLocalMedia(
+                chatId = chatId,
+                path = path,
+                mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream",
+                replyToMessageId = replyTarget?.id,
+            )
+            // Sending an attachment completes the pending reply just like sending text.
+            replyTarget = null
+            editingTarget = null
+            draft = TextFieldValue()
+        }
     }
     LaunchedEffect(chatId) { viewModel.openChat(chatId) }
     DisposableEffect(chatId) {
@@ -582,7 +593,9 @@ private fun MessageBubble(
             modifier = Modifier
                 .widthIn(max = 330.dp)
                 .clip(shape)
-                .combinedClickable(onClick = {}, onLongClick = { onLongClick(message) })
+                // A normal tap opens the same actions as a long press. This is important for
+                // photo messages, where users commonly tap the media itself to reply.
+                .combinedClickable(onClick = { onLongClick(message) }, onLongClick = { onLongClick(message) })
                 .background(bubbleColor)
                 .padding(horizontal = 11.dp, vertical = 7.dp),
             horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start,

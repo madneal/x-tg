@@ -75,6 +75,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tgclient.model.MediaType
 import com.example.tgclient.model.MessageSummary
 import java.io.File
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -239,15 +244,21 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
-                itemsIndexed(chatMessages, key = { _, message -> message.id }) { _, message ->
-                    MessageBubble(
-                        message = message,
-                        mergeWithPrevious = false,
-                        mergeWithNext = false,
-                        showSenderAvatar = chat?.isGroup == true,
-                        senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
-                        onDownloadFile = viewModel::downloadFile,
-                    )
+                itemsIndexed(chatMessages, key = { _, message -> message.id }) { index, message ->
+                    val previousMessage = chatMessages.getOrNull(index - 1)
+                    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        if (previousMessage == null || messageDateKey(previousMessage.dateEpochSeconds) != messageDateKey(message.dateEpochSeconds)) {
+                            MessageDateDivider(message.dateEpochSeconds)
+                        }
+                        MessageBubble(
+                            message = message,
+                            mergeWithPrevious = false,
+                            mergeWithNext = false,
+                            showSenderAvatar = chat?.isGroup == true,
+                            senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
+                            onDownloadFile = viewModel::downloadFile,
+                        )
+                    }
                 }
             }
         }
@@ -452,4 +463,40 @@ private fun MediaAttachment(
 private fun formatMessageTime(epochSeconds: Int): String {
     if (epochSeconds <= 0) return ""
     return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(epochSeconds.toLong() * 1000))
+}
+
+@Composable
+private fun MessageDateDivider(epochSeconds: Int) {
+    if (epochSeconds <= 0) return
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.88f),
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Text(
+            text = formatMessageDate(epochSeconds),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Medium,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+    }
+}
+
+private fun messageDateKey(epochSeconds: Int): LocalDate? =
+    if (epochSeconds <= 0) null else Instant.ofEpochSecond(epochSeconds.toLong()).atZone(ZoneId.systemDefault()).toLocalDate()
+
+private fun formatMessageDate(epochSeconds: Int): String {
+    val date = messageDateKey(epochSeconds) ?: return ""
+    val today = LocalDate.now(ZoneId.systemDefault())
+    val locale = Locale.getDefault()
+    return when {
+        date == today && locale.language.startsWith("zh") -> "今天"
+        date == today -> "Today"
+        date == today.minusDays(1) && locale.language.startsWith("zh") -> "昨天"
+        date == today.minusDays(1) -> "Yesterday"
+        locale.language.startsWith("zh") -> date.format(DateTimeFormatter.ofPattern("yyyy年M月d日", locale))
+        else -> date.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM).withLocale(locale))
+    }
 }

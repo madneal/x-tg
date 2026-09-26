@@ -564,7 +564,12 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val content = update.optJSONObject("new_content") ?: return
         val type = content.optString("@type")
         val media = mediaInfo(content, type)
-        media?.fileId?.let(::requestFile)
+        // Photos are small, frequently viewed conversation content and should
+        // be available without an extra tap. Larger media still follows the
+        // user's automatic-download setting to avoid filling the TDLib cache.
+        media?.fileId?.let { fileId ->
+            requestFile(fileId, respectAutoDownload = media.type != MediaType.PHOTO)
+        }
         val replacement = current.firstOrNull { it.id == messageId }?.copy(
             text = contentText(content).ifBlank { mediaLabel(type) },
             mediaType = media?.type ?: mediaType(type),
@@ -689,7 +694,9 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             "messageSenderChat" -> chatCache[sender.optLong("chat_id")]?.optString("title") ?: "Chat"
             else -> "Unknown"
         }
-        media?.fileId?.let(::requestFile)
+        media?.fileId?.let { fileId ->
+            requestFile(fileId, respectAutoDownload = media.type != MediaType.PHOTO)
+        }
         return MessageSummary(
             id = message.optLong("id"),
             chatId = chatId,

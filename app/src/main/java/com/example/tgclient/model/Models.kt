@@ -32,6 +32,14 @@ data class ChatSummary(
     val photoPath: String? = null,
 )
 
+/** A local chat folder, similar to Telegram's chat-folder tabs. */
+data class ChatFolder(
+    val id: String,
+    val title: String,
+    val chatIds: Set<Long> = emptySet(),
+    val isAllChats: Boolean = false,
+)
+
 data class MessageSummary(
     val id: Long,
     val chatId: Long,

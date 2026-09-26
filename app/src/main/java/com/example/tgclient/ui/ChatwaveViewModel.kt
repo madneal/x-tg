@@ -16,6 +16,7 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     val chats = repository.chats
     val messages = repository.messages
     val settings = repository.settings
+    val chatFolders = repository.chatFolders
     val currentUser = repository.currentUser
     val verification = repository.verification
 
@@ -46,6 +47,10 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun openChat(chatId: Long) = viewModelScope.launch { repository.loadMessages(chatId) }
     fun sendMessage(chatId: Long, text: String) = repository.sendText(chatId, text)
     fun sendLocalMedia(chatId: Long, path: String, mimeType: String) = repository.sendLocalMedia(chatId, path, mimeType)
+    fun createChatFolder(title: String) = repository.createChatFolder(title)
+    fun renameChatFolder(folderId: String, title: String) = repository.renameChatFolder(folderId, title)
+    fun deleteChatFolder(folderId: String) = repository.deleteChatFolder(folderId)
+    fun setChatFolderMembership(folderId: String, chatId: Long, included: Boolean) = repository.setChatFolderMembership(folderId, chatId, included)
     fun updateTheme(enabled: Boolean) = repository.updateSettings { it.copy(darkTheme = enabled) }
     fun updateNotifications(enabled: Boolean) = repository.updateSettings { it.copy(notificationsEnabled = enabled) }
     fun updateMessagePreview(enabled: Boolean) = repository.updateSettings { it.copy(showMessagePreview = enabled) }

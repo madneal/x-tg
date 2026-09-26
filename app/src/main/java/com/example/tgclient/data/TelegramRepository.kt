@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.tgclient.BuildConfig
 import com.example.tgclient.model.AppSettings
 import com.example.tgclient.model.AuthState
+import com.example.tgclient.model.ChatFolder
 import com.example.tgclient.model.ChatSummary
 import com.example.tgclient.model.MediaType
 import com.example.tgclient.model.MessageSummary
@@ -22,6 +23,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+import java.util.UUID
 
 class TelegramRepository(context: Context, scope: CoroutineScope, val accountId: String = DEFAULT_ACCOUNT_ID) {
     private val repositoryScope = scope
@@ -35,7 +37,9 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val _verification = MutableStateFlow(VerificationCodeState())
     private val _transfers = MutableStateFlow<Map<Int, TransferState>>(emptyMap())
     private val settingsPreferences = context.getSharedPreferences("chatwave_settings", Context.MODE_PRIVATE)
+    private val folderPreferences = context.getSharedPreferences("chatwave_chat_folders_$accountId", Context.MODE_PRIVATE)
     private val _settings = MutableStateFlow(loadSettings())
+    private val _chatFolders = MutableStateFlow(loadChatFolders())
     private val chatCache = ConcurrentHashMap<Long, JSONObject>()
     private val filePaths = ConcurrentHashMap<Int, String>()
     private val requestedDownloads = ConcurrentHashMap.newKeySet<Int>()
@@ -48,6 +52,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     val verification: StateFlow<VerificationCodeState> = _verification.asStateFlow()
     val transfers: StateFlow<Map<Int, TransferState>> = _transfers.asStateFlow()
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
+    val chatFolders: StateFlow<List<ChatFolder>> = _chatFolders.asStateFlow()
 
     init {
         if (BuildConfig.TELEGRAM_API_ID == 0 || BuildConfig.TELEGRAM_API_HASH.isBlank()) {
@@ -110,6 +115,46 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         _authState.value = AuthState.LoggingOut
         _currentUser.value = null
         client?.send("logOut")
+    }
+
+    fun createChatFolder(title: String): ChatFolder? {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank()) return null
+        val folder = ChatFolder("folder_${UUID.randomUUID().toString().replace("-", "").take(12)}", cleanTitle)
+        val updated = _chatFolders.value + folder
+        _chatFolders.value = updated
+        persistChatFolders(updated)
+        return folder
+    }
+
+    fun renameChatFolder(folderId: String, title: String) {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isBlank() || folderId == ALL_CHATS_FOLDER_ID) return
+        val updated = _chatFolders.value.map { folder ->
+            if (folder.id == folderId) folder.copy(title = cleanTitle) else folder
+        }
+        _chatFolders.value = updated
+        persistChatFolders(updated)
+    }
+
+    fun deleteChatFolder(folderId: String) {
+        if (folderId == ALL_CHATS_FOLDER_ID) return
+        val updated = _chatFolders.value.filterNot { it.id == folderId }
+        _chatFolders.value = if (updated.any { it.isAllChats }) updated else listOf(ChatFolder(ALL_CHATS_FOLDER_ID, "All chats", isAllChats = true))
+        persistChatFolders(_chatFolders.value)
+    }
+
+    fun setChatFolderMembership(folderId: String, chatId: Long, included: Boolean) {
+        if (folderId == ALL_CHATS_FOLDER_ID) return
+        val updated = _chatFolders.value.map { folder ->
+            if (folder.id != folderId) return@map folder
+            val chatIds = folder.chatIds.toMutableSet().apply {
+                if (included) add(chatId) else remove(chatId)
+            }
+            folder.copy(chatIds = chatIds)
+        }
+        _chatFolders.value = updated
+        persistChatFolders(updated)
     }
 
     suspend fun loadChats(limit: Int = 100) {
@@ -500,9 +545,42 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             type.optString("@type") == "chatTypeSupergroup" && type.optBoolean("is_channel")
         } == true
 
+    private fun loadChatFolders(): List<ChatFolder> {
+        val custom = folderPreferences.getString(FOLDER_IDS_KEY, null)
+            ?.split(',')
+            ?.map(String::trim)
+            ?.filter(String::isNotBlank)
+            ?.mapNotNull { id ->
+                val title = folderPreferences.getString("$FOLDER_NAME_PREFIX$id", null)?.trim().orEmpty()
+                if (title.isBlank()) null else ChatFolder(id, title, parseChatIds(folderPreferences.getString("$FOLDER_CHATS_PREFIX$id", null)))
+            }
+            .orEmpty()
+        return listOf(ChatFolder(ALL_CHATS_FOLDER_ID, "All chats", isAllChats = true)) + custom
+    }
+
+    private fun persistChatFolders(folders: List<ChatFolder>) {
+        val custom = folders.filterNot { it.isAllChats || it.id == ALL_CHATS_FOLDER_ID }
+        val editor = folderPreferences.edit().putString(FOLDER_IDS_KEY, custom.joinToString(",") { it.id })
+        custom.forEach { folder ->
+            editor.putString("$FOLDER_NAME_PREFIX${folder.id}", folder.title)
+            editor.putString("$FOLDER_CHATS_PREFIX${folder.id}", folder.chatIds.joinToString(","))
+        }
+        editor.apply()
+    }
+
+    private fun parseChatIds(value: String?): Set<Long> = value
+        ?.split(',')
+        ?.mapNotNull { it.trim().toLongOrNull() }
+        ?.toSet()
+        .orEmpty()
+
     private fun Throwable.safeMessage() = (this as? TelegramException)?.message ?: "Telegram request failed"
 
     private companion object {
         const val DEFAULT_ACCOUNT_ID = "default"
+        const val ALL_CHATS_FOLDER_ID = "all"
+        const val FOLDER_IDS_KEY = "folder_ids"
+        const val FOLDER_NAME_PREFIX = "folder_name."
+        const val FOLDER_CHATS_PREFIX = "folder_chats."
     }
 }

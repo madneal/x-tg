@@ -164,11 +164,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(9.dp),
             ) {
-                itemsIndexed(chatMessages, key = { _, message -> message.id }) { index, message ->
-                    val previous = chatMessages.getOrNull(index - 1)
-                    if (previous == null || !sameMessageDay(previous.dateEpochSeconds, message.dateEpochSeconds)) {
-                        DateLabel(message.dateEpochSeconds)
-                    }
+                itemsIndexed(chatMessages, key = { _, message -> message.id }) { _, message ->
                     MessageBubble(message, mergeWithPrevious = false, mergeWithNext = false)
                 }
             }
@@ -265,34 +261,6 @@ private fun MediaAttachment(label: String, icon: androidx.compose.ui.graphics.ve
         Spacer(Modifier.size(8.dp))
         Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
     }
-}
-
-@Composable
-private fun DateLabel(epochSeconds: Int) {
-    val pattern = if (Locale.getDefault().language == "zh") "yyyy年M月d日" else "MMMM d, yyyy"
-    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        Surface(
-            color = MaterialTheme.colorScheme.secondaryContainer,
-            shape = RoundedCornerShape(14.dp),
-        ) {
-            Text(
-                text = if (epochSeconds > 0) {
-                    SimpleDateFormat(pattern, Locale.getDefault()).format(Date(epochSeconds.toLong() * 1000))
-                } else {
-                    "Unknown date"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
-            )
-        }
-    }
-}
-
-private fun sameMessageDay(first: Int, second: Int): Boolean {
-    if (first <= 0 || second <= 0) return true
-    val formatter = SimpleDateFormat("yyyyMMdd", Locale.getDefault())
-    return formatter.format(Date(first.toLong() * 1000)) == formatter.format(Date(second.toLong() * 1000))
 }
 
 private fun formatMessageTime(epochSeconds: Int): String {

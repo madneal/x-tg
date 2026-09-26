@@ -504,7 +504,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         showMessagePreview = settingsPreferences.getBoolean("showMessagePreview", true),
         inAppSounds = settingsPreferences.getBoolean("inAppSounds", true),
         vibration = settingsPreferences.getBoolean("vibration", true),
-        autoDownloadMedia = settingsPreferences.getBoolean("autoDownloadMedia", true),
+        autoDownloadMedia = settingsPreferences.getBoolean("autoDownloadMedia", false),
         saveToGallery = settingsPreferences.getBoolean("saveToGallery", false),
         useLessData = settingsPreferences.getBoolean("useLessData", false),
         sendByEnter = settingsPreferences.getBoolean("sendByEnter", true),
@@ -640,7 +640,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val username = user.optString("username").ifBlank { null }
         val phone = user.optString("phone_number").ifBlank { null }
         val avatarFileId = user.optJSONObject("profile_photo")?.optJSONObject("small")?.optInt("id")?.takeIf { it > 0 }
-        avatarFileId?.let(::requestFile)
+        avatarFileId?.let { requestFile(it, respectAutoDownload = false) }
         return TelegramUser(
             id = user.optLong("id"),
             displayName = displayName.ifBlank { username ?: "User" },
@@ -665,7 +665,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         isPrivate = chat.isPrivateChat(),
         lastMessage = chat.optJSONObject("last_message")?.let { mapMessage(it, chat.optLong("id"), chat.isChannelChat()) },
         photoPath = chat.optJSONObject("photo")?.optJSONObject("small")?.optInt("id")?.takeIf { it > 0 }?.let { fileId ->
-            requestFile(fileId)
+            requestFile(fileId, respectAutoDownload = false)
             filePaths[fileId]
         },
     )
@@ -759,9 +759,13 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         else -> null
     }
 
-    private fun requestFile(fileId: Int) {
+    private fun requestFile(fileId: Int, priority: Int = 4, respectAutoDownload: Boolean = true) {
         if (fileId <= 0 || !requestedDownloads.add(fileId)) return
-        client?.send("downloadFile", JSONObject().put("file_id", fileId).put("priority", 4).put("offset", 0).put("limit", 0).put("synchronous", false))
+        if (respectAutoDownload && !_settings.value.autoDownloadMedia) {
+            requestedDownloads.remove(fileId)
+            return
+        }
+        client?.send("downloadFile", JSONObject().put("file_id", fileId).put("priority", priority).put("offset", 0).put("limit", 0).put("synchronous", false))
     }
 
     private fun JSONArray?.toMessageList(chatId: Long, channelPost: Boolean): List<MessageSummary> =

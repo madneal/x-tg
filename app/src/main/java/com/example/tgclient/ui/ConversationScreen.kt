@@ -246,6 +246,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                         mergeWithNext = false,
                         showSenderAvatar = chat?.isGroup == true,
                         senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
+                        onDownloadFile = viewModel::downloadFile,
                     )
                 }
             }
@@ -343,6 +344,7 @@ private fun MessageBubble(
     mergeWithNext: Boolean,
     showSenderAvatar: Boolean,
     senderAvatarPath: String?,
+    onDownloadFile: (Int) -> Unit,
 ) {
     val outgoing = message.isOutgoing
     val bubbleColor = if (outgoing) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
@@ -377,11 +379,15 @@ private fun MessageBubble(
             if (!outgoing && !mergeWithPrevious) Text(message.senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
             message.mediaType?.let { type ->
                 when (type) {
-                    MediaType.PHOTO -> if (message.mediaPath != null) MediaImage(message.mediaPath) else MediaAttachment("Photo", Icons.Default.InsertDriveFile)
-                    MediaType.VIDEO -> MediaAttachment("Video${message.mediaName?.let { " · $it" }.orEmpty()}", Icons.Default.PlayArrow)
-                    MediaType.DOCUMENT -> MediaAttachment(message.mediaName ?: "Document", Icons.Default.InsertDriveFile)
-                    MediaType.AUDIO -> MediaAttachment(message.mediaName ?: "Audio", Icons.Default.Audiotrack)
-                    MediaType.VOICE -> MediaAttachment("Voice message", Icons.Default.Audiotrack)
+                    MediaType.PHOTO -> if (message.mediaPath != null) {
+                        MediaImage(message.mediaPath)
+                    } else {
+                        MediaAttachment("Photo", Icons.Default.InsertDriveFile, message.mediaFileId?.let { { onDownloadFile(it) } })
+                    }
+                    MediaType.VIDEO -> MediaAttachment("Video${message.mediaName?.let { " · $it" }.orEmpty()}", Icons.Default.PlayArrow, message.mediaFileId?.let { { onDownloadFile(it) } })
+                    MediaType.DOCUMENT -> MediaAttachment(message.mediaName ?: "Document", Icons.Default.InsertDriveFile, message.mediaFileId?.let { { onDownloadFile(it) } })
+                    MediaType.AUDIO -> MediaAttachment(message.mediaName ?: "Audio", Icons.Default.Audiotrack, message.mediaFileId?.let { { onDownloadFile(it) } })
+                    MediaType.VOICE -> MediaAttachment("Voice message", Icons.Default.Audiotrack, message.mediaFileId?.let { { onDownloadFile(it) } })
                     MediaType.LOCATION -> MediaAttachment("Location", Icons.Default.LocationOn)
                 }
             }
@@ -424,7 +430,11 @@ private fun MediaImage(path: String) {
 }
 
 @Composable
-private fun MediaAttachment(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector) {
+private fun MediaAttachment(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onDownload: (() -> Unit)? = null,
+) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -432,6 +442,10 @@ private fun MediaAttachment(label: String, icon: androidx.compose.ui.graphics.ve
         Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp))
         Spacer(Modifier.size(8.dp))
         Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+        if (onDownload != null) {
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onDownload) { Text("Download") }
+        }
     }
 }
 

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -30,6 +31,7 @@ import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Vibration
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -54,10 +56,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.tgclient.BuildConfig
 import com.example.tgclient.data.TelegramAccountManager
 import com.example.tgclient.model.AccountSummary
+import com.example.tgclient.update.AppUpdateManager
+import com.example.tgclient.update.UpdateState
 
 private enum class AccountSetting { Profile, PhoneNumber, TwoStepVerification, ActiveSessions }
 
@@ -66,6 +72,7 @@ private enum class AccountSetting { Profile, PhoneNumber, TwoStepVerification, A
 fun SettingsScreen(
     viewModel: ChatwaveViewModel,
     accountManager: TelegramAccountManager,
+    updateManager: AppUpdateManager,
     activeAccountId: String,
     onBack: () -> Unit,
     onAccountChanged: () -> Unit,
@@ -74,6 +81,8 @@ fun SettingsScreen(
     val accounts by accountManager.accounts.collectAsStateWithLifecycle()
     val activeAccount = accounts.firstOrNull { it.id == activeAccountId }
     val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
+    val updateState by updateManager.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var showLanguageDialog by remember { mutableStateOf(false) }
     var accountToRemove by remember { mutableStateOf<AccountSummary?>(null) }
     var accountSetting by remember { mutableStateOf<AccountSetting?>(null) }
@@ -192,8 +201,48 @@ fun SettingsScreen(
                 SettingToggle(Icons.Default.Chat, "Reduce animations", "Use fewer motion effects in the interface", settings.reduceAnimations, viewModel::updateReduceAnimations)
             }
 
+            SettingsSection("App updates") {
+                val updateDescription = when (val state = updateState) {
+                    UpdateState.Idle -> "Check GitHub for a newer signed version"
+                    UpdateState.Checking -> "Checking for updates…"
+                    UpdateState.UpToDate -> "You are using the latest version"
+                    is UpdateState.Available -> "Version ${state.info.versionName} is available"
+                    is UpdateState.Downloading -> {
+                        if (state.totalBytes > 0) {
+                            "Downloading ${state.downloadedBytes / 1024 / 1024} / ${state.totalBytes / 1024 / 1024} MB"
+                        } else {
+                            "Downloading update…"
+                        }
+                    }
+                    is UpdateState.Ready -> "Version ${state.info.versionName} is ready to install"
+                    is UpdateState.Error -> state.message
+                }
+                ListItem(
+                    leadingContent = { Icon(Icons.Default.Download, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                    headlineContent = { Text("Check for updates") },
+                    supportingContent = { Text(updateDescription) },
+                    trailingContent = {
+                        when (val state = updateState) {
+                            UpdateState.Checking,
+                            is UpdateState.Downloading -> CircularProgressIndicator(modifier = Modifier.padding(8.dp).size(24.dp), strokeWidth = 2.dp)
+                            is UpdateState.Available -> TextButton(onClick = updateManager::downloadUpdate) { Text("Download") }
+                            is UpdateState.Ready -> TextButton(onClick = { updateManager.install(context) }) { Text("Install") }
+                            else -> TextButton(onClick = updateManager::checkForUpdates) { Text("Check") }
+                        }
+                    },
+                    modifier = Modifier.clickable {
+                        when (updateState) {
+                            UpdateState.Idle, UpdateState.UpToDate, is UpdateState.Error -> updateManager.checkForUpdates()
+                            is UpdateState.Available -> updateManager.downloadUpdate()
+                            is UpdateState.Ready -> updateManager.install(context)
+                            else -> Unit
+                        }
+                    },
+                )
+            }
+
             SettingsSection("About") {
-                SettingInfo(Icons.Default.Info, "Chatwave", "Unofficial Telegram client · Version 0.1.0")
+                SettingInfo(Icons.Default.Info, "Chatwave", "Unofficial Telegram client · Version ${BuildConfig.VERSION_NAME}")
                 Text(
                     "Telegram and TDLib are separate projects with their own licenses. Chatwave uses TDLib and does not copy Telegram's official Android UI.",
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),

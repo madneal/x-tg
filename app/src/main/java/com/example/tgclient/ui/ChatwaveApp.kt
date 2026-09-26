@@ -12,9 +12,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.tgclient.data.TelegramAccountManager
 import com.example.tgclient.model.AuthState
+import com.example.tgclient.update.AppUpdateManager
 
 @Composable
-fun ChatwaveApp(accountManager: TelegramAccountManager) {
+fun ChatwaveApp(accountManager: TelegramAccountManager, updateManager: AppUpdateManager) {
     val activeAccountId by accountManager.activeAccountId.collectAsStateWithLifecycle()
     val repository = remember(activeAccountId) { accountManager.repository(activeAccountId) }
     val viewModel: ChatwaveViewModel = viewModel(key = "account:$activeAccountId", factory = ChatwaveViewModel.factory(repository))
@@ -28,7 +29,7 @@ fun ChatwaveApp(accountManager: TelegramAccountManager) {
             when {
                 authState !is AuthState.Ready -> AuthScreen(authState, viewModel, accountManager, activeAccountId)
                 selectedChatId != null -> ConversationScreen(selectedChatId!!, viewModel) { selectedChatId = null }
-                showSettings -> SettingsScreen(viewModel, accountManager, activeAccountId, onBack = { showSettings = false }, onAccountChanged = { showSettings = false })
+                showSettings -> SettingsScreen(viewModel, accountManager, updateManager, activeAccountId, onBack = { showSettings = false }, onAccountChanged = { showSettings = false })
                 else -> ChatListScreen(viewModel, onSettingsClick = { showSettings = true }) { selectedChatId = it }
             }
         }

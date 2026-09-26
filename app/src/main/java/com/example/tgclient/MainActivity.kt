@@ -17,7 +17,8 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
         }
         setContent {
-            ChatwaveApp((application as TelegramApplication).telegramAccountManager)
+            val app = application as TelegramApplication
+            ChatwaveApp(app.telegramAccountManager, app.appUpdateManager)
         }
     }
 

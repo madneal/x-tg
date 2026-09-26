@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Audiotrack
@@ -50,6 +51,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -59,9 +61,11 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -86,6 +90,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tgclient.model.MediaType
 import com.example.tgclient.model.MessageEntity
 import com.example.tgclient.model.MessageSummary
+import kotlinx.coroutines.launch
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
@@ -118,6 +123,14 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     var linkUrl by remember { mutableStateOf("") }
     val clipboardManager = LocalClipboardManager.current
     val listState = rememberLazyListState()
+    val scrollScope = rememberCoroutineScope()
+    val chatMessages = messages[chatId].orEmpty()
+    val showJumpToLatest by remember(chatMessages.size) {
+        derivedStateOf {
+            val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            chatMessages.isNotEmpty() && lastVisibleIndex < chatMessages.lastIndex
+        }
+    }
     val chat = chats.firstOrNull { it.id == chatId }
     val title = chat?.title ?: "Chat"
     val chatTypeLabel = when {
@@ -280,34 +293,49 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
             }
         },
     ) { padding ->
-        val chatMessages = messages[chatId].orEmpty()
-        if (chatMessages.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(padding).background(MaterialTheme.colorScheme.background), contentAlignment = Alignment.Center) {
-                Text("No messages yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.fillMaxSize().padding(padding).background(MaterialTheme.colorScheme.background),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(9.dp),
-            ) {
-                itemsIndexed(chatMessages, key = { _, message -> message.id }) { index, message ->
-                    val previousMessage = chatMessages.getOrNull(index - 1)
-                    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                        if (previousMessage == null || messageDateKey(previousMessage.dateEpochSeconds) != messageDateKey(message.dateEpochSeconds)) {
-                            MessageDateDivider(message.dateEpochSeconds)
+        Box(Modifier.fillMaxSize().padding(padding).background(MaterialTheme.colorScheme.background)) {
+            if (chatMessages.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("No messages yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(9.dp),
+                ) {
+                    itemsIndexed(chatMessages, key = { _, message -> message.id }) { index, message ->
+                        val previousMessage = chatMessages.getOrNull(index - 1)
+                        Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                            if (previousMessage == null || messageDateKey(previousMessage.dateEpochSeconds) != messageDateKey(message.dateEpochSeconds)) {
+                                MessageDateDivider(message.dateEpochSeconds)
+                            }
+                            MessageBubble(
+                                message = message,
+                                mergeWithPrevious = false,
+                                mergeWithNext = false,
+                                showSenderAvatar = chat?.isGroup == true,
+                                senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
+                                onDownloadFile = viewModel::downloadFile,
+                                onLongClick = { selectedMessage = it },
+                            )
                         }
-                        MessageBubble(
-                            message = message,
-                            mergeWithPrevious = false,
-                            mergeWithNext = false,
-                            showSenderAvatar = chat?.isGroup == true,
-                            senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
-                            onDownloadFile = viewModel::downloadFile,
-                            onLongClick = { selectedMessage = it },
-                        )
                     }
+                }
+            }
+            if (showJumpToLatest) {
+                SmallFloatingActionButton(
+                    onClick = {
+                        scrollScope.launch {
+                            listState.animateScrollToItem(chatMessages.lastIndex)
+                        }
+                    },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 18.dp),
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ) {
+                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Jump to latest message")
                 }
             }
         }

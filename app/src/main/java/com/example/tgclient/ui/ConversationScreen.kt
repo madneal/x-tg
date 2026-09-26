@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -159,6 +160,10 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     }
 
     Scaffold(
+        // Apply IME insets to the page as a whole. Applying imePadding inside the
+        // bottom bar reserves the keyboard height below the composer and leaves a
+        // large empty block while typing, especially with Android edge-to-edge.
+        modifier = Modifier.imePadding(),
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
@@ -231,10 +236,11 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
         },
         bottomBar = {
             Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 8.dp) {
-                // Scaffold already accounts for the navigation bar. Applying both navigation
-                // and IME padding here created a second bottom inset and a large blank area
-                // above the keyboard on edge-to-edge Android windows.
-                Column(modifier = Modifier.imePadding()) {
+                // The activity uses adjustResize, so the bottom bar is measured in the
+                // resized window. Only the gesture/navigation bar inset belongs here;
+                // applying imePadding inside this column creates a blank block below the
+                // composer while the keyboard is visible.
+                Column(modifier = Modifier.navigationBarsPadding()) {
                     if (replyTarget != null || editingTarget != null) {
                         val target = editingTarget ?: replyTarget
                         Row(

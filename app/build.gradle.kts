@@ -51,8 +51,8 @@ android {
         applicationId = "com.example.tgclient"
         minSdk = 29
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.1.7"
+        versionCode = 9
+        versionName = "0.1.8"
 
         buildConfigField("int", "TELEGRAM_API_ID", secret("telegram.apiId").ifBlank { "0" })
         buildConfigField("String", "TELEGRAM_API_HASH", "\"${secret("telegram.apiHash").replace("\"", "\\\"")}\"")

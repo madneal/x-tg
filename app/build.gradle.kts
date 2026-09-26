@@ -51,8 +51,8 @@ android {
         applicationId = "com.example.tgclient"
         minSdk = 29
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.1.10"
+        versionCode = 12
+        versionName = "0.1.11"
 
         buildConfigField("int", "TELEGRAM_API_ID", secret("telegram.apiId").ifBlank { "0" })
         buildConfigField("String", "TELEGRAM_API_HASH", "\"${secret("telegram.apiHash").replace("\"", "\\\"")}\"")
@@ -81,7 +81,10 @@ android {
             isEnable = true
             reset()
             include("arm64-v8a", "armeabi-v7a", "x86_64")
-            isUniversalApk = true
+            // A universal APK contains every TDLib native library and is almost
+            // three times larger. Publish one signed APK per supported ABI so
+            // devices download only the native library they can execute.
+            isUniversalApk = false
         }
     }
 
@@ -95,6 +98,10 @@ android {
         buildConfig = true
     }
     packaging {
+        // Compress TDLib's native libraries inside the APK. Android extracts
+        // them during installation, trading a small install-time cost for a
+        // substantially smaller download.
+        jniLibs.useLegacyPackaging = true
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
 }

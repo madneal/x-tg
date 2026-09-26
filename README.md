@@ -16,6 +16,12 @@ not use Telegram's name or logo as its product branding.
    `assembleRelease`. Release builds fail when signing configuration is missing;
    the generated release APK is signed by Gradle.
 5. Build with `./gradlew assembleDebug` or open the project in Android Studio.
+   Release builds use ABI splits to avoid bundling every TDLib native library
+   into one oversized universal APK. `./gradlew assembleRelease` produces
+   signed `app-arm64-v8a-release.apk`, `app-armeabi-v7a-release.apk`, and
+   `app-x86_64-release.apk` files; install the one matching the device ABI.
+   Native libraries are compressed in these APKs to reduce download size, and
+   the in-app updater selects the matching release asset automatically.
 
 The app uses the version-pinned `io.github.tdlibx` Android artifact, which
 packages the official TDLib native library and generated Java API. The

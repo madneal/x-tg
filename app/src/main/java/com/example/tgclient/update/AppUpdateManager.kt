@@ -36,6 +36,7 @@ sealed interface UpdateState {
 data class AppUpdateInfo(
     val versionName: String,
     val tagName: String,
+    val assetName: String,
     val downloadUrl: String,
     val releaseUrl: String,
     val notes: String,
@@ -112,21 +113,14 @@ class AppUpdateManager(context: Context, private val scope: CoroutineScope) {
             val body = connection.inputStream.bufferedReader().use { it.readText() }
             val release = JSONObject(body)
             val assets = release.optJSONArray("assets")
-            var downloadUrl: String? = null
-            if (assets != null) {
-                for (index in 0 until assets.length()) {
-                    val asset = assets.optJSONObject(index) ?: continue
-                    if (asset.optString("name") == APK_ASSET_NAME) {
-                        downloadUrl = asset.optString("browser_download_url").takeIf { it.isNotBlank() }
-                        break
-                    }
-                }
-            }
+            val selectedAsset = selectApkAsset(assets)
+                ?: throw IllegalStateException("Release APK for this device is unavailable")
             val tagName = release.optString("tag_name").ifBlank { throw IllegalStateException("Release tag is missing") }
             AppUpdateInfo(
                 versionName = tagName.removePrefix("v"),
                 tagName = tagName,
-                downloadUrl = downloadUrl ?: throw IllegalStateException("Release APK is unavailable"),
+                assetName = selectedAsset.first,
+                downloadUrl = selectedAsset.second,
                 releaseUrl = release.optString("html_url"),
                 notes = release.optString("body"),
             )
@@ -137,7 +131,7 @@ class AppUpdateManager(context: Context, private val scope: CoroutineScope) {
 
     private suspend fun download(info: AppUpdateInfo): File {
         val updateDirectory = File(appContext.cacheDir, "updates").apply { mkdirs() }
-        val target = File(updateDirectory, "chatwave-${info.versionName}.apk")
+        val target = File(updateDirectory, "chatwave-${info.versionName}-${info.assetName}.apk")
         if (target.isFile && target.length() > 0L) return target
         val partial = File(updateDirectory, "${target.name}.part")
         val connection = openConnection(info.downloadUrl)
@@ -197,9 +191,31 @@ class AppUpdateManager(context: Context, private val scope: CoroutineScope) {
     private fun versionParts(value: String): List<Int> =
         Regex("\\d+").findAll(value).map { it.value.toIntOrNull() ?: 0 }.toList()
 
+    /**
+     * Select the smallest release asset that can run on this device. Older
+     * releases may still contain a universal APK, so keep it as a fallback
+     * while new releases publish ABI-specific artifacts only.
+     */
+    private fun selectApkAsset(assets: org.json.JSONArray?): Pair<String, String>? {
+        if (assets == null) return null
+        val available = buildList {
+            for (index in 0 until assets.length()) {
+                val asset = assets.optJSONObject(index) ?: continue
+                val name = asset.optString("name")
+                val url = asset.optString("browser_download_url").takeIf { it.isNotBlank() }
+                if (name.endsWith(".apk", ignoreCase = true) && url != null) add(name to url)
+            }
+        }
+        val supportedAbis = Build.SUPPORTED_ABIS
+        val matching = supportedAbis.firstNotNullOfOrNull { abi ->
+            available.firstOrNull { (name, _) -> name.contains("-$abi-") }
+        }
+        return matching ?: available.firstOrNull { (name, _) -> name == UNIVERSAL_APK_ASSET_NAME }
+    }
+
     private companion object {
         const val LATEST_RELEASE_URL = "https://api.github.com/repos/madneal/x-tg/releases/latest"
-        const val APK_ASSET_NAME = "app-universal-release.apk"
+        const val UNIVERSAL_APK_ASSET_NAME = "app-universal-release.apk"
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         const val BUFFER_SIZE = 64 * 1024
         const val CONNECT_TIMEOUT_MS = 15_000

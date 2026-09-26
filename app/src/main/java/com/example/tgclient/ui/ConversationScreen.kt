@@ -648,9 +648,7 @@ private data class PendingMedia(
 
 @Composable
 private fun PendingMediaPreview(media: PendingMedia, onRemove: () -> Unit) {
-    val bitmap = remember(media.path) {
-        if (media.mimeType.startsWith("image/")) android.graphics.BitmapFactory.decodeFile(media.path) else null
-    }
+    val bitmap = if (media.mimeType.startsWith("image/")) rememberDecodedBitmap(media.path, maxDimension = 512) else null
     Surface(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -912,7 +910,7 @@ private fun MessageEntity.annotationValue(): String =
 
 @Composable
 private fun MediaImage(path: String) {
-    val bitmap = remember(path) { android.graphics.BitmapFactory.decodeFile(path) }
+    val bitmap = rememberDecodedBitmap(path, maxDimension = 960)
     if (bitmap != null) {
         Image(
             bitmap = bitmap.asImageBitmap(),

@@ -53,6 +53,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -68,6 +69,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tgclient.model.ChatFolder
 import com.example.tgclient.model.ChatSummary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -391,7 +394,7 @@ fun Avatar(title: String, size: Dp = 54.dp, photoPath: String? = null) {
     val color = colors[title.hashCode().ushr(1) % colors.size]
     val initials = title.trim().split(" ").filter { it.isNotBlank() }.take(2).joinToString("") { it.first().uppercase() }.ifBlank { "C" }
     Box(Modifier.size(size).clip(CircleShape).background(color), contentAlignment = Alignment.Center) {
-        val bitmap = remember(photoPath) { photoPath?.let(android.graphics.BitmapFactory::decodeFile) }
+        val bitmap = rememberDecodedBitmap(photoPath, maxDimension = 256)
         if (bitmap != null) {
             androidx.compose.foundation.Image(
                 bitmap = bitmap.asImageBitmap(),
@@ -403,6 +406,29 @@ fun Avatar(title: String, size: Dp = 54.dp, photoPath: String? = null) {
             Text(initials, color = Color.White, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
         }
     }
+}
+
+@Composable
+fun rememberDecodedBitmap(path: String?, maxDimension: Int): android.graphics.Bitmap? {
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, key1 = path, key2 = maxDimension) {
+        value = withContext(Dispatchers.IO) { path?.let { decodeSampledBitmap(it, maxDimension) } }
+    }
+    return bitmap
+}
+
+private fun decodeSampledBitmap(path: String, maxDimension: Int): android.graphics.Bitmap? {
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    android.graphics.BitmapFactory.decodeFile(path, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (maxOf(bounds.outWidth / sample, bounds.outHeight / sample) > maxDimension) sample *= 2
+    return android.graphics.BitmapFactory.decodeFile(
+        path,
+        android.graphics.BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+        },
+    )
 }
 
 private fun formatTime(epochSeconds: Int): String {

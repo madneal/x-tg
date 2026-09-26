@@ -31,9 +31,18 @@ class MessageRetentionStore(context: Context, accountId: String) {
     private val records = linkedMapOf<String, JSONObject>()
 
     fun save(message: MessageSummary) {
+        saveAll(listOf(message))
+    }
+
+    /** Saves a page in one encrypted write instead of rewriting the archive per message. */
+    fun saveAll(messages: Iterable<MessageSummary>) {
+        val page = messages.toList()
+        if (page.isEmpty()) return
         synchronized(lock) {
             loadLocked()
-            records[key(message.chatId, message.id)] = toJson(copyMediaIfNeeded(message))
+            page.forEach { message ->
+                records[key(message.chatId, message.id)] = toJson(copyMediaIfNeeded(message))
+            }
             trimLocked()
             persistLocked()
         }

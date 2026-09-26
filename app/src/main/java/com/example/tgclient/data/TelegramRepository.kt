@@ -22,6 +22,7 @@ import com.example.tgclient.security.DatabaseKeyStore
 import com.example.tgclient.security.MessageRetentionStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,6 +30,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -353,10 +355,14 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 fromMessageId = nextFromMessageId
                 pageCount += 1
             }
-            if (_settings.value.retainDeletedMessages) loaded.forEach(messageRetentionStore::save)
+            if (_settings.value.retainDeletedMessages) withContext(Dispatchers.IO) { messageRetentionStore.saveAll(loaded) }
             if (_settings.value.saveToGallery) loaded.forEach(::maybeAutoSaveMedia)
             val merged = mergeMessages(_messages.value[chatId].orEmpty(), loaded)
-            val retained = if (_settings.value.retainDeletedMessages) messageRetentionStore.loadChat(chatId) else emptyList()
+            val retained = if (_settings.value.retainDeletedMessages) {
+                withContext(Dispatchers.IO) { messageRetentionStore.loadChat(chatId) }
+            } else {
+                emptyList()
+            }
             _messages.value = _messages.value + (chatId to mergeMessages(merged, retained))
         }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
     }
@@ -580,7 +586,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val request = GallerySaveRequest(mediaType, fileName)
         val path = (localPath ?: filePaths[fileId])?.let(::File)?.takeIf { it.isFile }?.absolutePath
         if (path != null) {
-            saveLocalFileToMediaStore(fileId, path, request)
+            repositoryScope.launch(Dispatchers.IO) { saveLocalFileToMediaStore(fileId, path, request) }
         } else {
             pendingGallerySaves[fileId] = request
             downloadFile(fileId)
@@ -600,8 +606,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }.getOrDefault(emptyList())
 
     fun clearRetainedMessages() {
-        messageRetentionStore.clear()
         _messages.value = _messages.value.mapValues { (_, messages) -> messages.filterNot { it.isDeleted } }
+        repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.clear() }
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
@@ -695,7 +701,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val chatId = message.optLong("chat_id").takeIf { it != 0L } ?: return
         val isChannel = chatCache[chatId]?.isChannelChat() == true
         val mapped = mapMessage(message, chatId, isChannel) ?: return
-        if (_settings.value.retainDeletedMessages) messageRetentionStore.save(mapped)
+        if (_settings.value.retainDeletedMessages) repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.save(mapped) }
         maybeAutoSaveMedia(mapped)
         val current = _messages.value[chatId].orEmpty()
         _messages.value = _messages.value + (chatId to mergeMessages(current, listOf(mapped)))
@@ -723,7 +729,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             mediaName = media?.name,
             entities = entities,
         ) ?: return
-        if (_settings.value.retainDeletedMessages) messageRetentionStore.save(replacement)
+        if (_settings.value.retainDeletedMessages) repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.save(replacement) }
         maybeAutoSaveMedia(replacement)
         _messages.value = _messages.value + (chatId to current.map { if (it.id == messageId) replacement else it })
     }
@@ -733,7 +739,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val messageIds = update.optJSONArray("message_ids") ?: return
         val ids = (0 until messageIds.length()).map { messageIds.optLong(it) }.toSet()
         if (_settings.value.retainDeletedMessages) {
-            messageRetentionStore.markDeleted(chatId, ids)
+            repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.markDeleted(chatId, ids) }
             val current = _messages.value[chatId].orEmpty()
             _messages.value = _messages.value + (chatId to current.map { message -> if (message.id in ids) message.copy(isDeleted = true) else message })
         } else {
@@ -753,19 +759,28 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val local = file.optJSONObject("local") ?: return
         val id = file.optInt("id")
         val path = local.optString("path").takeIf { it.isNotBlank() }
+        val isCompleted = local.optBoolean("is_downloading_completed")
         if (path != null) filePaths[id] = path
-        _transfers.value = _transfers.value + (id to TransferState(id, local.optLong("downloaded_size"), file.optLong("size"), local.optBoolean("is_downloading_completed")))
-        publishChats()
-        _currentUser.value?.takeIf { it.avatarFileId == id }?.let { _currentUser.value = it.copy(avatarPath = path ?: it.avatarPath) }
-        _users.value = _users.value.mapValues { (_, user) -> if (user.avatarFileId == id) user.copy(avatarPath = path ?: user.avatarPath) else user }
-        _messages.value = _messages.value.mapValues { (_, messages) ->
-            messages.map { message ->
-                if (message.mediaFileId == id) message.copy(mediaPath = path ?: message.mediaPath) else message
+        _transfers.value = _transfers.value + (id to TransferState(id, local.optLong("downloaded_size"), file.optLong("size"), isCompleted))
+        // File updates can arrive many times per second. Progress is kept in the transfer
+        // state, while chat/message paths are published only when the file is complete.
+        if (isCompleted && path != null) {
+            publishChats()
+            _currentUser.value?.takeIf { it.avatarFileId == id }?.let { _currentUser.value = it.copy(avatarPath = path) }
+            _users.value = _users.value.mapValues { (_, user) -> if (user.avatarFileId == id) user.copy(avatarPath = path) else user }
+            _messages.value = _messages.value.mapValues { (_, messages) ->
+                messages.map { message ->
+                    if (message.mediaFileId == id) message.copy(mediaPath = path) else message
+                }
             }
         }
-        if (_settings.value.retainDeletedMessages && path != null) messageRetentionStore.updateMediaPath(id, path)
-        if (local.optBoolean("is_downloading_completed") && path != null) {
-            pendingGallerySaves.remove(id)?.let { request -> saveLocalFileToMediaStore(id, path, request) }
+        if (_settings.value.retainDeletedMessages && isCompleted && path != null) {
+            repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.updateMediaPath(id, path) }
+        }
+        if (isCompleted && path != null) {
+            pendingGallerySaves.remove(id)?.let { request ->
+                repositoryScope.launch(Dispatchers.IO) { saveLocalFileToMediaStore(id, path, request) }
+            }
             if (_settings.value.saveToGallery) {
                 _messages.value.values.flatten()
                     .filter { it.mediaFileId == id }

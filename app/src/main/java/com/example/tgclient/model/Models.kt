@@ -21,6 +21,18 @@ data class VerificationCodeState(
     val nextType: String? = null,
 )
 
+/** A single in-flight authorization request. Used to prevent duplicate taps. */
+enum class AuthAction {
+    None,
+    SubmitPhone,
+    SubmitCode,
+    ResendCode,
+    SubmitPassword,
+    Register,
+    SubmitEmail,
+    SubmitEmailCode,
+}
+
 data class ChatSummary(
     val id: Long,
     val title: String,

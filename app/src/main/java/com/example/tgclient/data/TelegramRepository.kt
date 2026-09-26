@@ -3,6 +3,7 @@ package com.example.tgclient.data
 import android.content.Context
 import com.example.tgclient.BuildConfig
 import com.example.tgclient.model.AppSettings
+import com.example.tgclient.model.AuthAction
 import com.example.tgclient.model.AuthState
 import com.example.tgclient.model.ChatFolder
 import com.example.tgclient.model.ChatSummary
@@ -14,15 +15,19 @@ import com.example.tgclient.model.VerificationCodeState
 import com.example.tgclient.notifications.TelegramNotificationController
 import com.example.tgclient.security.DatabaseKeyStore
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
 
 class TelegramRepository(context: Context, scope: CoroutineScope, val accountId: String = DEFAULT_ACCOUNT_ID) {
@@ -35,6 +40,9 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val _users = MutableStateFlow<Map<Long, TelegramUser>>(emptyMap())
     private val _currentUser = MutableStateFlow<TelegramUser?>(null)
     private val _verification = MutableStateFlow(VerificationCodeState())
+    private val _authAction = MutableStateFlow(AuthAction.None)
+    private val authActionGuard = AtomicReference(AuthAction.None)
+    private val authStateVersion = MutableStateFlow(0L)
     private val _transfers = MutableStateFlow<Map<Int, TransferState>>(emptyMap())
     private val settingsPreferences = context.getSharedPreferences("chatwave_settings", Context.MODE_PRIVATE)
     private val folderPreferences = context.getSharedPreferences("chatwave_chat_folders_$accountId", Context.MODE_PRIVATE)
@@ -51,6 +59,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     val users: StateFlow<Map<Long, TelegramUser>> = _users.asStateFlow()
     val currentUser: StateFlow<TelegramUser?> = _currentUser.asStateFlow()
     val verification: StateFlow<VerificationCodeState> = _verification.asStateFlow()
+    val authAction: StateFlow<AuthAction> = _authAction.asStateFlow()
     val transfers: StateFlow<Map<Int, TransferState>> = _transfers.asStateFlow()
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
     val chatFolders: StateFlow<List<ChatFolder>> = _chatFolders.asStateFlow()
@@ -68,9 +77,10 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         }
     }
 
-    fun submitPhoneNumber(phoneNumber: String) = client?.send(
-        "setAuthenticationPhoneNumber",
-        JSONObject()
+    fun submitPhoneNumber(phoneNumber: String) = runAuthRequest(
+        action = AuthAction.SubmitPhone,
+        type = "setAuthenticationPhoneNumber",
+        fields = JSONObject()
             .put("phone_number", phoneNumber)
             .put(
                 "settings",
@@ -85,14 +95,57 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                     .put("authentication_tokens", JSONArray()),
             ),
     )
-    fun submitEmailAddress(emailAddress: String) = client?.send("setAuthenticationEmailAddress", JSONObject().put("email_address", emailAddress))
-    fun submitEmailCode(code: String) = client?.send("checkAuthenticationEmailCode", JSONObject().put("code", JSONObject().put("@type", "emailAddressAuthenticationCode").put("code", code)))
-    fun submitCode(code: String) = client?.send("checkAuthenticationCode", JSONObject().put("code", code))
-    fun resendCode() = client?.send("resendAuthenticationCode")
+    fun submitEmailAddress(emailAddress: String) = runAuthRequest(
+        AuthAction.SubmitEmail,
+        "setAuthenticationEmailAddress",
+        JSONObject().put("email_address", emailAddress),
+    )
+    fun submitEmailCode(code: String) = runAuthRequest(
+        AuthAction.SubmitEmailCode,
+        "checkAuthenticationEmailCode",
+        JSONObject().put("code", JSONObject().put("@type", "emailAddressAuthenticationCode").put("code", code)),
+    )
+    fun submitCode(code: String) = runAuthRequest(AuthAction.SubmitCode, "checkAuthenticationCode", JSONObject().put("code", code))
+    fun resendCode() = runAuthRequest(AuthAction.ResendCode, "resendAuthenticationCode")
     /** Replaces the phone number while TDLib is still in the login flow. */
     fun changeAuthenticationPhoneNumber(phoneNumber: String) = submitPhoneNumber(phoneNumber)
-    fun submitPassword(password: String) = client?.send("checkAuthenticationPassword", JSONObject().put("password", password))
-    fun register(firstName: String, lastName: String) = client?.send("registerUser", JSONObject().put("first_name", firstName).put("last_name", lastName))
+    fun submitPassword(password: String) = runAuthRequest(AuthAction.SubmitPassword, "checkAuthenticationPassword", JSONObject().put("password", password))
+    fun register(firstName: String, lastName: String) = runAuthRequest(
+        AuthAction.Register,
+        "registerUser",
+        JSONObject().put("first_name", firstName).put("last_name", lastName),
+    )
+
+    /**
+     * Sends an authorization request once and keeps the action locked until
+     * TDLib publishes the next authorization state. This makes a slow network
+     * response visible in the UI and prevents duplicate requests from rapid taps.
+     */
+    private fun runAuthRequest(action: AuthAction, type: String, fields: JSONObject = JSONObject()) {
+        if (client == null || !authActionGuard.compareAndSet(AuthAction.None, action)) return
+        _authAction.value = action
+        val requestStateVersion = authStateVersion.value
+        repositoryScope.launch {
+            try {
+                client.request(type, fields)
+                // Usually the state update arrives immediately after the OK
+                // response. Keep the guard briefly if the update is delayed,
+                // then allow retrying a genuinely lost request.
+                withTimeoutOrNull(AUTH_ACTION_TIMEOUT_MS) {
+                    authStateVersion.first { it > requestStateVersion }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: TelegramException) {
+                _authState.value = AuthState.Error(error.message)
+            } catch (_: Exception) {
+                _authState.value = AuthState.Error("Unable to contact Telegram. Please try again.")
+            } finally {
+                authActionGuard.compareAndSet(action, AuthAction.None)
+                _authAction.value = AuthAction.None
+            }
+        }
+    }
 
     suspend fun updateProfile(firstName: String, lastName: String, username: String) {
         runCatching {
@@ -373,6 +426,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 } else {
                     VerificationCodeState()
                 }
+                authStateVersion.value += 1
                 val mappedState = AuthStateMapper.fromJson(authorizationState)
                 _authState.value = mappedState
                 if (mappedState is AuthState.Ready) repositoryScope.launch { loadCurrentUser() }
@@ -657,5 +711,6 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         const val FOLDER_IDS_KEY = "folder_ids"
         const val FOLDER_NAME_PREFIX = "folder_name."
         const val FOLDER_CHATS_PREFIX = "folder_chats."
+        const val AUTH_ACTION_TIMEOUT_MS = 15_000L
     }
 }

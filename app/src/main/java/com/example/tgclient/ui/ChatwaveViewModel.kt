@@ -19,6 +19,7 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     val chatFolders = repository.chatFolders
     val currentUser = repository.currentUser
     val verification = repository.verification
+    val authAction = repository.authAction
 
     val ready: StateFlow<Boolean> = authState
         .combine(repository.chats) { auth, _ -> auth is AuthState.Ready }

@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tgclient.data.TelegramAccountManager
+import com.example.tgclient.model.AuthAction
 import com.example.tgclient.model.AuthState
 import kotlinx.coroutines.delay
 
@@ -48,6 +49,7 @@ fun AuthScreen(state: AuthState, viewModel: ChatwaveViewModel, accountManager: T
     var showPhoneEditor by rememberSaveable(activeAccountId) { mutableStateOf(false) }
     var showRemoveDialog by rememberSaveable(activeAccountId) { mutableStateOf(false) }
     val verification by viewModel.verification.collectAsStateWithLifecycle()
+    val authAction by viewModel.authAction.collectAsStateWithLifecycle()
     val authStep = when (state) {
         AuthState.WaitPhoneNumber -> "phone"
         AuthState.WaitCode -> "code"
@@ -134,7 +136,15 @@ fun AuthScreen(state: AuthState, viewModel: ChatwaveViewModel, accountManager: T
                         state != AuthState.Ready
                     if (showPhoneEditor) {
                         Text("Use a different phone number for this account.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        AuthField("New phone number", "+1 555 123 4567", phoneInput, KeyboardType.Phone, "Send code", { phoneInput = it }) {
+                        AuthField(
+                            "New phone number",
+                            "+1 555 123 4567",
+                            phoneInput,
+                            KeyboardType.Phone,
+                            "Send code",
+                            { phoneInput = it },
+                            loading = authAction == AuthAction.SubmitPhone,
+                        ) {
                             input = ""
                             showPhoneEditor = false
                             viewModel.changeAuthenticationPhoneNumber(phoneInput.trim())
@@ -147,30 +157,95 @@ fun AuthScreen(state: AuthState, viewModel: ChatwaveViewModel, accountManager: T
                                 Text("Telegram API credentials are missing.", color = MaterialTheme.colorScheme.error)
                                 Text("Add telegram.apiId and telegram.apiHash to local.properties, then rebuild.")
                             }
-                            AuthState.WaitPhoneNumber -> AuthField("Phone number", "+1 555 123 4567", input, KeyboardType.Phone, "Continue", { input = it }) { viewModel.submitPhone(input.trim()) }
+                            AuthState.WaitPhoneNumber -> AuthField(
+                                "Phone number",
+                                "+1 555 123 4567",
+                                input,
+                                KeyboardType.Phone,
+                                "Continue",
+                                { input = it },
+                                loading = authAction == AuthAction.SubmitPhone,
+                            ) { viewModel.submitPhone(input.trim()) }
                             AuthState.WaitCode -> {
-                                AuthField("Verification code", "12345", input, KeyboardType.Number, "Verify", { input = it }) { viewModel.submitCode(input.trim()) }
+                                AuthField(
+                                    "Verification code",
+                                    "12345",
+                                    input,
+                                    KeyboardType.Number,
+                                    "Verify",
+                                    { input = it },
+                                    loading = authAction == AuthAction.SubmitCode,
+                                ) { viewModel.submitCode(input.trim()) }
                                 TextButton(
                                     onClick = {
                                         resendNonce += 1
                                         viewModel.resendCode()
                                     },
-                                    enabled = remainingSeconds == 0,
+                                    enabled = remainingSeconds == 0 && authAction != AuthAction.ResendCode,
                                     modifier = Modifier.fillMaxWidth(),
                                 ) {
-                                    Text(if (remainingSeconds > 0) "Resend code in ${remainingSeconds}s" else "Resend code")
+                                    if (authAction == AuthAction.ResendCode) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.padding(end = 8.dp),
+                                            color = MaterialTheme.colorScheme.primary,
+                                            strokeWidth = 2.dp,
+                                        )
+                                        Text("Sending code…")
+                                    } else {
+                                        Text(if (remainingSeconds > 0) "Resend code in ${remainingSeconds}s" else "Resend code")
+                                    }
                                 }
                             }
-                            AuthState.WaitPassword -> AuthField("Password", "Two-step password", input, KeyboardType.Password, "Sign in", { input = it }) { viewModel.submitPassword(input) }
+                            AuthState.WaitPassword -> AuthField(
+                                "Password",
+                                "Two-step password",
+                                input,
+                                KeyboardType.Password,
+                                "Sign in",
+                                { input = it },
+                                loading = authAction == AuthAction.SubmitPassword,
+                            ) { viewModel.submitPassword(input) }
                             AuthState.WaitRegistration -> {
                                 AuthField("First name", "", input, KeyboardType.Text, null, { input = it })
-                                AuthField("Last name (optional)", "", secondInput, KeyboardType.Text, "Create account", { secondInput = it }) { viewModel.register(input.trim(), secondInput.trim()) }
+                                AuthField(
+                                    "Last name (optional)",
+                                    "",
+                                    secondInput,
+                                    KeyboardType.Text,
+                                    "Create account",
+                                    { secondInput = it },
+                                    loading = authAction == AuthAction.Register,
+                                ) { viewModel.register(input.trim(), secondInput.trim()) }
                             }
-                            AuthState.WaitEmailAddress -> AuthField("Email address", "name@example.com", input, KeyboardType.Email, "Continue", { viewModel.submitEmail(input.trim()) })
-                            AuthState.WaitEmailCode -> AuthField("Email verification code", "12345", input, KeyboardType.Number, "Verify", { viewModel.submitEmailCode(input.trim()) })
+                            AuthState.WaitEmailAddress -> AuthField(
+                                "Email address",
+                                "name@example.com",
+                                input,
+                                KeyboardType.Email,
+                                "Continue",
+                                { input = it },
+                                loading = authAction == AuthAction.SubmitEmail,
+                            ) { viewModel.submitEmail(input.trim()) }
+                            AuthState.WaitEmailCode -> AuthField(
+                                "Email verification code",
+                                "12345",
+                                input,
+                                KeyboardType.Number,
+                                "Verify",
+                                { input = it },
+                                loading = authAction == AuthAction.SubmitEmailCode,
+                            ) { viewModel.submitEmailCode(input.trim()) }
                             is AuthState.Error -> {
                                 Text(state.message, color = MaterialTheme.colorScheme.error)
-                                AuthField("Phone number", "+1 555 123 4567", input, KeyboardType.Phone, "Try again", { input = it }) { viewModel.submitPhone(input.trim()) }
+                                AuthField(
+                                    "Phone number",
+                                    "+1 555 123 4567",
+                                    input,
+                                    KeyboardType.Phone,
+                                    "Try again",
+                                    { input = it },
+                                    loading = authAction == AuthAction.SubmitPhone,
+                                ) { viewModel.submitPhone(input.trim()) }
                             }
                             AuthState.Ready -> Unit
                         }
@@ -214,6 +289,7 @@ private fun AuthField(
     keyboardType: KeyboardType,
     buttonLabel: String?,
     onValueChange: (String) -> Unit,
+    loading: Boolean = false,
     onSubmit: () -> Unit = {},
 ) {
     OutlinedTextField(
@@ -225,5 +301,22 @@ private fun AuthField(
         singleLine = true,
         modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
     )
-    if (buttonLabel != null) Button(onClick = onSubmit, enabled = value.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text(buttonLabel) }
+    if (buttonLabel != null) {
+        Button(
+            onClick = onSubmit,
+            enabled = value.isNotBlank() && !loading,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            if (loading) {
+                CircularProgressIndicator(
+                    modifier = Modifier.padding(end = 8.dp),
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    strokeWidth = 2.dp,
+                )
+                Text("Sending…")
+            } else {
+                Text(buttonLabel)
+            }
+        }
+    }
 }

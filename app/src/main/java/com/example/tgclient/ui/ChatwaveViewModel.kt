@@ -51,6 +51,10 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun renameChatFolder(folderId: String, title: String) = repository.renameChatFolder(folderId, title)
     fun deleteChatFolder(folderId: String) = repository.deleteChatFolder(folderId)
     fun setChatFolderMembership(folderId: String, chatId: Long, included: Boolean) = repository.setChatFolderMembership(folderId, chatId, included)
+    fun leaveChat(chatId: Long) = repository.leaveChat(chatId)
+    fun deleteChatHistory(chatId: Long) = repository.deleteChatHistory(chatId)
+    fun toggleChatPinned(chatId: Long, pinned: Boolean) = repository.toggleChatPinned(chatId, pinned)
+    fun toggleChatMarkedAsUnread(chatId: Long, markedAsUnread: Boolean) = repository.toggleChatMarkedAsUnread(chatId, markedAsUnread)
     fun updateTheme(enabled: Boolean) = repository.updateSettings { it.copy(darkTheme = enabled) }
     fun updateNotifications(enabled: Boolean) = repository.updateSettings { it.copy(notificationsEnabled = enabled) }
     fun updateMessagePreview(enabled: Boolean) = repository.updateSettings { it.copy(showMessagePreview = enabled) }

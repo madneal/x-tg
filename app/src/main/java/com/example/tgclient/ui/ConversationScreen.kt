@@ -35,13 +35,20 @@ import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBar
@@ -78,9 +85,18 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var draft by remember { mutableStateOf("") }
+    var showChatMenu by remember { mutableStateOf(false) }
+    var confirmLeave by remember { mutableStateOf(false) }
+    var confirmClearHistory by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val chat = chats.firstOrNull { it.id == chatId }
     val title = chat?.title ?: "Chat"
+    val chatTypeLabel = when {
+        chat?.isChannel == true -> "Channel"
+        chat?.isGroup == true -> "Group"
+        chat?.isPrivate == true -> "Private chat"
+        else -> "Telegram chat"
+    }
     val mediaPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         val path = uri.copyToCache(context)
@@ -98,12 +114,53 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                         Spacer(Modifier.size(10.dp))
                         Column {
                             Text(title, maxLines = 1, fontWeight = FontWeight.SemiBold)
-                            Text(if (chat?.isChannel == true) "Channel" else "Telegram chat", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(chatTypeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") }
+                },
+                actions = {
+                    Box {
+                        IconButton(onClick = { showChatMenu = true }) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Chat actions")
+                        }
+                        DropdownMenu(expanded = showChatMenu, onDismissRequest = { showChatMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text(if (chat?.isPinned == true) "Unpin chat" else "Pin chat") },
+                                onClick = {
+                                    showChatMenu = false
+                                    viewModel.toggleChatPinned(chatId, chat?.isPinned != true)
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (chat?.isMarkedAsUnread == true) "Mark as read" else "Mark as unread") },
+                                onClick = {
+                                    showChatMenu = false
+                                    viewModel.toggleChatMarkedAsUnread(chatId, chat?.isMarkedAsUnread != true)
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Clear history") },
+                                leadingIcon = { Icon(Icons.Default.DeleteSweep, contentDescription = null) },
+                                onClick = {
+                                    showChatMenu = false
+                                    confirmClearHistory = true
+                                },
+                            )
+                            if (chat?.isGroup == true || chat?.isChannel == true) {
+                                DropdownMenuItem(
+                                    text = { Text(if (chat.isChannel) "Leave channel" else "Leave group") },
+                                    leadingIcon = { Icon(Icons.Default.ExitToApp, contentDescription = null) },
+                                    onClick = {
+                                        showChatMenu = false
+                                        confirmLeave = true
+                                    },
+                                )
+                            }
+                        }
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
             )
@@ -169,6 +226,42 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                 }
             }
         }
+    }
+
+    if (confirmClearHistory) {
+        AlertDialog(
+            onDismissRequest = { confirmClearHistory = false },
+            title = { Text("Clear chat history?") },
+            text = { Text("Messages will be removed from this chat on this device and from Telegram according to your account permissions.") },
+            dismissButton = { TextButton(onClick = { confirmClearHistory = false }) { Text("Cancel") } },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmClearHistory = false
+                        viewModel.deleteChatHistory(chatId)
+                    },
+                ) { Text("Clear") }
+            },
+        )
+    }
+
+    if (confirmLeave) {
+        val leaveLabel = if (chat?.isChannel == true) "channel" else "group"
+        AlertDialog(
+            onDismissRequest = { confirmLeave = false },
+            title = { Text("Leave $leaveLabel?") },
+            text = { Text("You will stop receiving messages from this $leaveLabel. You can join again with an invite link if one is available.") },
+            dismissButton = { TextButton(onClick = { confirmLeave = false }) { Text("Cancel") } },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmLeave = false
+                        viewModel.leaveChat(chatId)
+                        onBack()
+                    },
+                ) { Text("Leave") }
+            },
+        )
     }
 }
 

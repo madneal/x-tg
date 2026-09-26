@@ -26,8 +26,11 @@ data class ChatSummary(
     val title: String,
     val subtitle: String = "",
     val unreadCount: Int = 0,
+    val isMarkedAsUnread: Boolean = false,
     val isPinned: Boolean = false,
     val isChannel: Boolean = false,
+    val isGroup: Boolean = false,
+    val isPrivate: Boolean = false,
     val lastMessage: MessageSummary? = null,
     val photoPath: String? = null,
 )

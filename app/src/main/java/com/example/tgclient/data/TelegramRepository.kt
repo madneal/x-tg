@@ -43,6 +43,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val chatCache = ConcurrentHashMap<Long, JSONObject>()
     private val filePaths = ConcurrentHashMap<Int, String>()
     private val requestedDownloads = ConcurrentHashMap.newKeySet<Int>()
+    private val localPinOverrides = ConcurrentHashMap<Long, Boolean>()
 
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
     val chats: StateFlow<List<ChatSummary>> = _chats.asStateFlow()
@@ -155,6 +156,65 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         }
         _chatFolders.value = updated
         persistChatFolders(updated)
+    }
+
+    fun leaveChat(chatId: Long) {
+        repositoryScope.launch {
+            runCatching { client?.request("leaveChat", JSONObject().put("chat_id", chatId)) }
+                .onSuccess {
+                    chatCache.remove(chatId)
+                    _messages.value = _messages.value - chatId
+                    publishChats()
+                }
+                .onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+        }
+    }
+
+    fun deleteChatHistory(chatId: Long) {
+        repositoryScope.launch {
+            runCatching {
+                client?.request(
+                    "deleteChatHistory",
+                    JSONObject()
+                        .put("chat_id", chatId)
+                        .put("remove_from_chat_list", false)
+                        .put("revoke", false),
+                )
+            }.onSuccess {
+                _messages.value = _messages.value + (chatId to emptyList())
+            }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+        }
+    }
+
+    fun toggleChatPinned(chatId: Long, pinned: Boolean) {
+        repositoryScope.launch {
+            runCatching {
+                client?.request(
+                    "toggleChatIsPinned",
+                    JSONObject()
+                        .put("chat_list", JSONObject().put("@type", "chatListMain"))
+                        .put("chat_id", chatId)
+                        .put("is_pinned", pinned),
+                )
+            }.onSuccess {
+                localPinOverrides[chatId] = pinned
+                publishChats()
+            }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+        }
+    }
+
+    fun toggleChatMarkedAsUnread(chatId: Long, markedAsUnread: Boolean) {
+        repositoryScope.launch {
+            runCatching {
+                client?.request(
+                    "toggleChatIsMarkedAsUnread",
+                    JSONObject().put("chat_id", chatId).put("is_marked_as_unread", markedAsUnread),
+                )
+            }.onSuccess {
+                chatCache[chatId]?.put("is_marked_as_unread", markedAsUnread)
+                publishChats()
+            }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+        }
     }
 
     suspend fun loadChats(limit: Int = 100) {
@@ -433,8 +493,11 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         title = chat.optString("title", "Chat"),
         subtitle = chat.optJSONObject("last_message")?.let(::messagePreview).orEmpty(),
         unreadCount = chat.optInt("unread_count"),
-        isPinned = chat.optJSONArray("positions")?.let { positions -> (0 until positions.length()).any { positions.optJSONObject(it)?.optBoolean("is_pinned") == true } } == true,
+        isMarkedAsUnread = chat.optBoolean("is_marked_as_unread"),
+        isPinned = localPinOverrides[chat.optLong("id")] ?: (chat.optJSONArray("positions")?.let { positions -> (0 until positions.length()).any { positions.optJSONObject(it)?.optBoolean("is_pinned") == true } } == true),
         isChannel = chat.isChannelChat(),
+        isGroup = chat.isGroupChat(),
+        isPrivate = chat.isPrivateChat(),
         lastMessage = chat.optJSONObject("last_message")?.let { mapMessage(it, chat.optLong("id"), chat.isChannelChat()) },
         photoPath = chat.optJSONObject("photo")?.optJSONObject("small")?.optInt("id")?.takeIf { it > 0 }?.let { fileId ->
             requestFile(fileId)
@@ -544,6 +607,18 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         optJSONObject("type")?.let { type ->
             type.optString("@type") == "chatTypeSupergroup" && type.optBoolean("is_channel")
         } == true
+
+    private fun JSONObject.isGroupChat(): Boolean {
+        val type = optJSONObject("type") ?: return false
+        return when (type.optString("@type")) {
+            "chatTypeBasicGroup" -> true
+            "chatTypeSupergroup" -> !type.optBoolean("is_channel")
+            else -> false
+        }
+    }
+
+    private fun JSONObject.isPrivateChat(): Boolean =
+        optJSONObject("type")?.optString("@type") == "chatTypePrivate"
 
     private fun loadChatFolders(): List<ChatFolder> {
         val custom = folderPreferences.getString(FOLDER_IDS_KEY, null)

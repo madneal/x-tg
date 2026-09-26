@@ -16,9 +16,36 @@ fun secret(name: String): String =
         ?: localProperties.getProperty(name)
         ?: ""
 
+val releaseStoreFile = secret("release.storeFile")
+val releaseStorePassword = secret("release.storePassword")
+val releaseKeyAlias = secret("release.keyAlias")
+val releaseKeyPassword = secret("release.keyPassword")
+
 android {
     namespace = "com.example.tgclient"
     compileSdk = 35
+
+    signingConfigs {
+        create("release") {
+            val missing = listOf(
+                "release.storeFile" to releaseStoreFile,
+                "release.storePassword" to releaseStorePassword,
+                "release.keyAlias" to releaseKeyAlias,
+                "release.keyPassword" to releaseKeyPassword,
+            ).filter { it.second.isBlank() }.map { it.first }
+            if (missing.isNotEmpty()) {
+                throw GradleException("Release signing is required. Missing: ${missing.joinToString()}")
+            }
+            val keystore = rootProject.file(releaseStoreFile)
+            if (!keystore.isFile) {
+                throw GradleException("Release keystore does not exist: ${keystore.absolutePath}")
+            }
+            storeFile = keystore
+            storePassword = releaseStorePassword
+            keyAlias = releaseKeyAlias
+            keyPassword = releaseKeyPassword
+        }
+    }
 
     defaultConfig {
         applicationId = "com.example.tgclient"
@@ -37,6 +64,7 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

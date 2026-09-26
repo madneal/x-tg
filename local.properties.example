@@ -4,3 +4,9 @@
 # Get these values from https://my.telegram.org.
 telegram.apiId=123456
 telegram.apiHash=replace-me
+
+# Required for assembleRelease. Keep the keystore and passwords outside Git.
+release.storeFile=/absolute/path/to/chatwave-release.keystore
+release.storePassword=replace-me
+release.keyAlias=chatwave
+release.keyPassword=replace-me

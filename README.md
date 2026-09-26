@@ -11,7 +11,11 @@ not use Telegram's name or logo as its product branding.
 3. Copy `local.properties.example` to `local.properties` and fill in your
    `telegram.apiId` and `telegram.apiHash` values. `local.properties` is ignored
    by Git.
-4. Build with `./gradlew assembleDebug` or open the project in Android Studio.
+4. Configure `release.storeFile`, `release.storePassword`, `release.keyAlias`,
+   and `release.keyPassword` in `local.properties` before running
+   `assembleRelease`. Release builds fail when signing configuration is missing;
+   the generated release APK is signed by Gradle.
+5. Build with `./gradlew assembleDebug` or open the project in Android Studio.
 
 The app uses the version-pinned `io.github.tdlibx` Android artifact, which
 packages the official TDLib native library and generated Java API. The

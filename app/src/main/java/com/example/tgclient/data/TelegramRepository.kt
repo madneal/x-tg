@@ -297,11 +297,40 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 publishChats()
             }
             val isChannel = chat?.isChannelChat() ?: chatCache[chatId]?.isChannelChat() == true
-            client?.request("getChatHistory", JSONObject().put("chat_id", chatId).put("from_message_id", 0).put("offset", 0).put("limit", limit).put("only_local", false))?.let { result ->
-                val loaded = result.optJSONArray("messages").toMessageList(chatId, isChannel)
-                val merged = mergeMessages(_messages.value[chatId].orEmpty(), loaded)
-                _messages.value = _messages.value + (chatId to merged)
+            val pageLimit = limit.coerceIn(1, 100)
+            val loaded = mutableListOf<MessageSummary>()
+            var fromMessageId = 0L
+            var pageCount = 0
+            var retriedInitialHistory = false
+            while (loaded.size < limit && pageCount < MAX_HISTORY_PAGES) {
+                val result = client?.request(
+                    "getChatHistory",
+                    JSONObject()
+                        .put("chat_id", chatId)
+                        .put("from_message_id", fromMessageId)
+                        .put("offset", 0)
+                        .put("limit", pageLimit)
+                        .put("only_local", false),
+                ) ?: break
+                val messages = result.optJSONArray("messages") ?: break
+                if (messages.length() == 0) break
+                loaded += messages.toMessageList(chatId, isChannel)
+                val nextFromMessageId = messages.optJSONObject(messages.length() - 1)?.optLong("id") ?: 0L
+                // TDLib can return only the latest channel post while it is
+                // filling the local history database. Repeat the initial
+                // request once so the following response contains the rest
+                // of the available page instead of stopping at one message.
+                if (fromMessageId == 0L && !retriedInitialHistory && messages.length() < pageLimit && nextFromMessageId > 0L) {
+                    retriedInitialHistory = true
+                    pageCount += 1
+                    continue
+                }
+                if (nextFromMessageId <= 0L || nextFromMessageId == fromMessageId) break
+                fromMessageId = nextFromMessageId
+                pageCount += 1
             }
+            val merged = mergeMessages(_messages.value[chatId].orEmpty(), loaded)
+            _messages.value = _messages.value + (chatId to merged)
         }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
     }
 
@@ -804,6 +833,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         const val FOLDER_NAME_PREFIX = "folder_name."
         const val FOLDER_CHATS_PREFIX = "folder_chats."
         const val AUTH_ACTION_TIMEOUT_MS = 15_000L
+        const val MAX_HISTORY_PAGES = 8
         const val ACTIVITY_WINDOW_SECONDS = 24 * 60 * 60L
         const val MAX_ACTIVITY_PAGES = 200
         val NON_ACTIVITY_MESSAGE_TYPES = setOf(

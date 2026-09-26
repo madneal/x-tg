@@ -3,7 +3,9 @@ package com.example.tgclient.ui
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -68,11 +70,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tgclient.model.MediaType
+import com.example.tgclient.model.MessageEntity
 import com.example.tgclient.model.MessageSummary
 import java.io.File
 import java.time.Instant
@@ -84,7 +96,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () -> Unit) {
     val messages by viewModel.messages.collectAsStateWithLifecycle()
@@ -93,11 +105,18 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val groupActivity by viewModel.groupActivity.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    var draft by remember { mutableStateOf("") }
+    var draft by remember { mutableStateOf(TextFieldValue()) }
     var showChatMenu by remember { mutableStateOf(false) }
     var showActivityDialog by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
     var confirmClearHistory by remember { mutableStateOf(false) }
+    var selectedMessage by remember { mutableStateOf<MessageSummary?>(null) }
+    var confirmDeleteMessage by remember { mutableStateOf<MessageSummary?>(null) }
+    var replyTarget by remember { mutableStateOf<MessageSummary?>(null) }
+    var editingTarget by remember { mutableStateOf<MessageSummary?>(null) }
+    var showLinkDialog by remember { mutableStateOf(false) }
+    var linkUrl by remember { mutableStateOf("") }
+    val clipboardManager = LocalClipboardManager.current
     val listState = rememberLazyListState()
     val chat = chats.firstOrNull { it.id == chatId }
     val title = chat?.title ?: "Chat"
@@ -190,10 +209,31 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
         },
         bottomBar = {
             Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 8.dp) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().navigationBarsPadding().imePadding().padding(horizontal = 8.dp, vertical = 7.dp),
-                    verticalAlignment = Alignment.Bottom,
-                ) {
+                Column(modifier = Modifier.navigationBarsPadding().imePadding()) {
+                    if (replyTarget != null || editingTarget != null) {
+                        val target = editingTarget ?: replyTarget
+                        Row(
+                            modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant).padding(start = 16.dp, end = 8.dp, top = 7.dp, bottom = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(if (editingTarget != null) "Editing message" else "Replying to ${target?.senderName.orEmpty()}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                                Text(target?.text ?: "", maxLines = 1, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            TextButton(onClick = { replyTarget = null; editingTarget = null; draft = TextFieldValue() }) { Text("Cancel") }
+                        }
+                    }
+                    if (draft.text.isNotEmpty()) {
+                        RichTextToolbar(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                            onFormat = { type, style -> draft = draft.applyFormat(type, style) },
+                            onLink = { showLinkDialog = true },
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.Bottom,
+                    ) {
                     IconButton(onClick = { mediaPicker.launch("*/*") }) {
                         Icon(Icons.Default.AttachFile, contentDescription = "Attach media", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -205,9 +245,10 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                         maxLines = 5,
                         keyboardOptions = KeyboardOptions(imeAction = if (settings.sendByEnter) ImeAction.Send else ImeAction.Default),
                         keyboardActions = KeyboardActions(onSend = {
-                            if (settings.sendByEnter && draft.isNotBlank()) {
-                                viewModel.sendMessage(chatId, draft.trim())
-                                draft = ""
+                            if (settings.sendByEnter) sendDraft(viewModel, chatId, draft, editingTarget, replyTarget) {
+                                draft = TextFieldValue()
+                                editingTarget = null
+                                replyTarget = null
                             }
                         }),
                         shape = RoundedCornerShape(24.dp),
@@ -223,12 +264,19 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                     )
                     Spacer(Modifier.size(6.dp))
                     IconButton(
-                        onClick = { if (draft.isNotBlank()) { viewModel.sendMessage(chatId, draft.trim()); draft = "" } },
+                        onClick = {
+                            if (draft.text.isNotBlank()) sendDraft(viewModel, chatId, draft, editingTarget, replyTarget) {
+                                draft = TextFieldValue()
+                                editingTarget = null
+                                replyTarget = null
+                            }
+                        },
                         modifier = Modifier.size(48.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
                     ) {
-                        Icon(if (draft.isBlank()) Icons.Default.Mic else Icons.Default.Send, contentDescription = if (draft.isBlank()) "Voice message" else "Send", tint = MaterialTheme.colorScheme.onPrimary)
+                        Icon(if (draft.text.isBlank()) Icons.Default.Mic else Icons.Default.Send, contentDescription = if (draft.text.isBlank()) "Voice message" else "Send", tint = MaterialTheme.colorScheme.onPrimary)
                     }
                 }
+            }
             }
         },
     ) { padding ->
@@ -257,6 +305,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                             showSenderAvatar = chat?.isGroup == true,
                             senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
                             onDownloadFile = viewModel::downloadFile,
+                            onLongClick = { selectedMessage = it },
                         )
                     }
                 }
@@ -340,6 +389,122 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
             confirmButton = { TextButton(onClick = { showActivityDialog = false }) { Text("Close") } },
         )
     }
+
+    selectedMessage?.let { target ->
+        AlertDialog(
+            onDismissRequest = { selectedMessage = null },
+            title = { Text("Message actions") },
+            text = {
+                Column {
+                    Text(messageAnnotatedString(target), style = MaterialTheme.typography.bodyMedium, maxLines = 3)
+                    TextButton(
+                        onClick = {
+                            replyTarget = target
+                            editingTarget = null
+                            draft = TextFieldValue()
+                            selectedMessage = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Reply") }
+                    if (target.canEdit) {
+                        TextButton(
+                            onClick = {
+                                editingTarget = target
+                                replyTarget = null
+                                draft = target.toTextFieldValue()
+                                selectedMessage = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Edit") }
+                    }
+                    TextButton(
+                        onClick = {
+                            clipboardManager.setText(AnnotatedString(target.text))
+                            selectedMessage = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Copy text") }
+                    if (target.canForward) {
+                        TextButton(
+                            onClick = {
+                                viewModel.forwardMessageToSaved(chatId, target.id)
+                                selectedMessage = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Forward to Saved Messages") }
+                    }
+                    TextButton(
+                        onClick = {
+                            viewModel.toggleMessageReaction(chatId, target.id)
+                            selectedMessage = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("React 👍") }
+                    TextButton(
+                        onClick = {
+                            viewModel.toggleMessagePinned(chatId, target.id, !target.isPinned)
+                            selectedMessage = null
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text(if (target.isPinned) "Unpin message" else "Pin message") }
+                    if (target.canDelete) {
+                        TextButton(
+                            onClick = {
+                                confirmDeleteMessage = target
+                                selectedMessage = null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Delete message", color = MaterialTheme.colorScheme.error) }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { selectedMessage = null }) { Text("Close") } },
+        )
+    }
+
+    confirmDeleteMessage?.let { target ->
+        AlertDialog(
+            onDismissRequest = { confirmDeleteMessage = null },
+            title = { Text("Delete message?") },
+            text = { Text("This message will be deleted for everyone when Telegram allows it.") },
+            dismissButton = { TextButton(onClick = { confirmDeleteMessage = null }) { Text("Cancel") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteMessage(chatId, target.id)
+                    confirmDeleteMessage = null
+                }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            },
+        )
+    }
+
+    if (showLinkDialog) {
+        AlertDialog(
+            onDismissRequest = { showLinkDialog = false },
+            title = { Text("Add link") },
+            text = {
+                androidx.compose.material3.OutlinedTextField(
+                    value = linkUrl,
+                    onValueChange = { linkUrl = it },
+                    label = { Text("URL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { showLinkDialog = false }) { Text("Cancel") }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        draft = draft.applyLink(linkUrl.trim())
+                        linkUrl = ""
+                        showLinkDialog = false
+                    },
+                    enabled = linkUrl.trim().startsWith("http://") || linkUrl.trim().startsWith("https://"),
+                ) { Text("Apply") }
+            },
+        )
+    }
 }
 
 private fun android.net.Uri.copyToCache(context: android.content.Context): String? = runCatching {
@@ -349,6 +514,7 @@ private fun android.net.Uri.copyToCache(context: android.content.Context): Strin
 }.getOrNull()
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun MessageBubble(
     message: MessageSummary,
     mergeWithPrevious: Boolean,
@@ -356,6 +522,7 @@ private fun MessageBubble(
     showSenderAvatar: Boolean,
     senderAvatarPath: String?,
     onDownloadFile: (Int) -> Unit,
+    onLongClick: (MessageSummary) -> Unit,
 ) {
     val outgoing = message.isOutgoing
     val bubbleColor = if (outgoing) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
@@ -384,10 +551,18 @@ private fun MessageBubble(
             Spacer(Modifier.size(6.dp))
         }
         Column(
-            modifier = Modifier.widthIn(max = 330.dp).clip(shape).background(bubbleColor).padding(horizontal = 11.dp, vertical = 7.dp),
+            modifier = Modifier
+                .widthIn(max = 330.dp)
+                .clip(shape)
+                .combinedClickable(onClick = {}, onLongClick = { onLongClick(message) })
+                .background(bubbleColor)
+                .padding(horizontal = 11.dp, vertical = 7.dp),
             horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start,
         ) {
             if (!outgoing && !mergeWithPrevious) Text(message.senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+            message.replyToMessageId?.let {
+                Text("↪ Reply", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 3.dp))
+            }
             message.mediaType?.let { type ->
                 when (type) {
                     MediaType.PHOTO -> if (message.mediaPath != null) {
@@ -412,7 +587,7 @@ private fun MessageBubble(
                 null -> null
             }
             if (message.text.isNotBlank() && message.text != mediaPlaceholder) {
-                Text(message.text, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                Text(messageAnnotatedString(message), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
             }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.align(if (outgoing) Alignment.End else Alignment.Start)) {
                 Text(formatMessageTime(message.dateEpochSeconds), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -424,6 +599,119 @@ private fun MessageBubble(
         }
     }
 }
+
+@Composable
+private fun RichTextToolbar(
+    modifier: Modifier = Modifier,
+    onFormat: (String, SpanStyle) -> Unit,
+    onLink: () -> Unit,
+) {
+    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        FormatButton("B", "textEntityTypeBold", SpanStyle(fontWeight = FontWeight.Bold), onFormat)
+        FormatButton("I", "textEntityTypeItalic", SpanStyle(fontStyle = FontStyle.Italic), onFormat)
+        FormatButton("U", "textEntityTypeUnderline", SpanStyle(textDecoration = TextDecoration.Underline), onFormat)
+        FormatButton("S", "textEntityTypeStrikethrough", SpanStyle(textDecoration = TextDecoration.LineThrough), onFormat)
+        FormatButton("Code", "textEntityTypeCode", SpanStyle(fontFamily = FontFamily.Monospace), onFormat)
+        TextButton(onClick = onLink, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)) { Text("Link") }
+    }
+}
+
+@Composable
+private fun FormatButton(label: String, type: String, style: SpanStyle, onFormat: (String, SpanStyle) -> Unit) {
+    TextButton(onClick = { onFormat(type, style) }, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+        Text(label, fontWeight = if (type == "textEntityTypeBold") FontWeight.Bold else FontWeight.Normal)
+    }
+}
+
+private fun TextFieldValue.applyFormat(type: String, style: SpanStyle): TextFieldValue {
+    val start = minOf(selection.start, selection.end)
+    val end = maxOf(selection.start, selection.end)
+    if (start == end) return this
+    val builder = AnnotatedString.Builder()
+    builder.append(annotatedString)
+    builder.addStyle(style, start, end)
+    builder.addStringAnnotation("chatwave_entity", type, start, end)
+    return copy(annotatedString = builder.toAnnotatedString())
+}
+
+private fun TextFieldValue.applyLink(url: String): TextFieldValue {
+    val start = minOf(selection.start, selection.end)
+    val end = maxOf(selection.start, selection.end)
+    if (start == end || url.isBlank()) return this
+    val builder = AnnotatedString.Builder()
+    builder.append(annotatedString)
+    builder.addStyle(SpanStyle(textDecoration = TextDecoration.Underline, color = Color(0xFF2A8BE7)), start, end)
+    builder.addStringAnnotation("chatwave_entity", "textEntityTypeTextUrl|$url", start, end)
+    return copy(annotatedString = builder.toAnnotatedString())
+}
+
+private fun sendDraft(
+    viewModel: ChatwaveViewModel,
+    chatId: Long,
+    draft: TextFieldValue,
+    editingTarget: MessageSummary?,
+    replyTarget: MessageSummary?,
+    onSent: () -> Unit,
+) {
+    if (draft.text.isBlank()) return
+    val entities = draft.annotatedString.toMessageEntities()
+    if (editingTarget != null) {
+        viewModel.editMessage(chatId, editingTarget.id, draft.text, entities)
+    } else {
+        viewModel.sendMessage(chatId, draft.text, entities, replyTarget?.id)
+    }
+    onSent()
+}
+
+private fun AnnotatedString.toMessageEntities(): List<MessageEntity> =
+    getStringAnnotations("chatwave_entity", 0, length)
+        .map { range ->
+            val separator = range.item.indexOf('|')
+            if (separator >= 0) {
+                MessageEntity(range.start, range.end - range.start, range.item.substring(0, separator), range.item.substring(separator + 1))
+            } else {
+                MessageEntity(range.start, range.end - range.start, range.item)
+            }
+        }
+        .distinctBy { Triple(it.offset, it.length, it.type) }
+
+private fun MessageSummary.toTextFieldValue(): TextFieldValue {
+    val builder = AnnotatedString.Builder()
+    builder.append(text)
+    entities.forEach { entity ->
+        val start = entity.offset.coerceIn(0, text.length)
+        val end = (entity.offset + entity.length).coerceIn(start, text.length)
+        if (start >= end) return@forEach
+        entity.style()?.let { builder.addStyle(it, start, end) }
+        builder.addStringAnnotation("chatwave_entity", entity.annotationValue(), start, end)
+    }
+    return TextFieldValue(builder.toAnnotatedString(), TextRange(text.length))
+}
+
+private fun messageAnnotatedString(message: MessageSummary): AnnotatedString {
+    val builder = AnnotatedString.Builder()
+    builder.append(message.text)
+    message.entities.forEach { entity ->
+        val start = entity.offset.coerceIn(0, message.text.length)
+        val end = (entity.offset + entity.length).coerceIn(start, message.text.length)
+        if (start >= end) return@forEach
+        entity.style()?.let { builder.addStyle(it, start, end) }
+    }
+    return builder.toAnnotatedString()
+}
+
+private fun MessageEntity.style(): SpanStyle? = when (type) {
+    "textEntityTypeBold" -> SpanStyle(fontWeight = FontWeight.Bold)
+    "textEntityTypeItalic" -> SpanStyle(fontStyle = FontStyle.Italic)
+    "textEntityTypeUnderline" -> SpanStyle(textDecoration = TextDecoration.Underline)
+    "textEntityTypeStrikethrough" -> SpanStyle(textDecoration = TextDecoration.LineThrough)
+    "textEntityTypeCode", "textEntityTypePre", "textEntityTypePreCode" -> SpanStyle(fontFamily = FontFamily.Monospace)
+    "textEntityTypeTextUrl", "textEntityTypeUrl", "textEntityTypeEmailAddress" -> SpanStyle(textDecoration = TextDecoration.Underline, color = Color(0xFF2A8BE7))
+    else -> null
+}
+
+private fun MessageEntity.annotationValue(): String =
+    if (type == "textEntityTypeTextUrl" && !argument.isNullOrBlank()) "$type|$argument" else type
 
 @Composable
 private fun MediaImage(path: String) {

@@ -10,6 +10,7 @@ import com.example.tgclient.model.ChatSummary
 import com.example.tgclient.model.GroupActivityState
 import com.example.tgclient.model.GroupSpeakerStat
 import com.example.tgclient.model.MediaType
+import com.example.tgclient.model.MessageEntity
 import com.example.tgclient.model.MessageSummary
 import com.example.tgclient.model.TelegramUser
 import com.example.tgclient.model.TransferState
@@ -397,9 +398,13 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     fun sendText(chatId: Long, text: String, replyToMessageId: Long? = null) {
+        sendText(chatId, text, emptyList(), replyToMessageId)
+    }
+
+    fun sendText(chatId: Long, text: String, entities: List<MessageEntity>, replyToMessageId: Long? = null) {
         val content = JSONObject()
             .put("@type", "inputMessageText")
-            .put("text", JSONObject().put("@type", "formattedText").put("text", text).put("entities", JSONArray()))
+            .put("text", formattedText(text, entities))
             .put("link_preview_options", if (_settings.value.linkPreviews) JSONObject.NULL else JSONObject().put("@type", "linkPreviewOptions").put("is_disabled", true))
             .put("clear_draft", true)
         client?.send(
@@ -411,6 +416,66 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 .put("options", JSONObject.NULL)
                 .put("reply_markup", JSONObject.NULL)
                 .put("input_message_content", content),
+        )
+    }
+
+    fun editMessageText(chatId: Long, messageId: Long, text: String, entities: List<MessageEntity>) {
+        val content = JSONObject()
+            .put("@type", "inputMessageText")
+            .put("text", formattedText(text, entities))
+            .put("link_preview_options", if (_settings.value.linkPreviews) JSONObject.NULL else JSONObject().put("@type", "linkPreviewOptions").put("is_disabled", true))
+            .put("clear_draft", false)
+        client?.send(
+            "editMessageText",
+            JSONObject()
+                .put("chat_id", chatId)
+                .put("message_id", messageId)
+                .put("reply_markup", JSONObject.NULL)
+                .put("input_message_content", content),
+        )
+    }
+
+    fun deleteMessage(chatId: Long, messageId: Long) {
+        client?.send(
+            "deleteMessages",
+            JSONObject()
+                .put("chat_id", chatId)
+                .put("message_ids", JSONArray().put(messageId))
+                .put("revoke", true),
+        )
+    }
+
+    fun forwardMessageToSaved(chatId: Long, messageId: Long) {
+        val savedChatId = _currentUser.value?.id ?: return
+        client?.send(
+            "forwardMessages",
+            JSONObject()
+                .put("chat_id", savedChatId)
+                .put("message_thread_id", 0)
+                .put("from_chat_id", chatId)
+                .put("message_ids", JSONArray().put(messageId))
+                .put("options", JSONObject.NULL)
+                .put("send_copy", false)
+                .put("remove_caption", false),
+        )
+    }
+
+    fun toggleMessagePinned(chatId: Long, messageId: Long, pinned: Boolean) {
+        val type = if (pinned) "pinChatMessage" else "unpinChatMessage"
+        val fields = JSONObject().put("chat_id", chatId).put("message_id", messageId)
+        if (pinned) fields.put("disable_notification", false)
+        client?.send(type, fields)
+    }
+
+    fun toggleMessageReaction(chatId: Long, messageId: Long, emoji: String = "👍") {
+        client?.send(
+            "setMessageReaction",
+            JSONObject()
+                .put("chat_id", chatId)
+                .put("message_id", messageId)
+                .put("reaction", JSONObject().put("@type", "reactionTypeEmoji").put("emoji", emoji))
+                .put("is_big", false)
+                .put("update_recent_reactions", true),
         )
     }
 
@@ -537,6 +602,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             "updateChatLastMessage" -> chatCache[update.optLong("chat_id")]?.put("last_message", update.optJSONObject("last_message"))?.also { publishChats() }
             "updateNewMessage" -> update.optJSONObject("message")?.let(::publishMessage)
             "updateMessageContent" -> updateMessageContent(update)
+            "updateDeleteMessages" -> deletePublishedMessages(update)
+            "updateMessageIsPinned" -> updateMessagePinned(update)
             "updateFile" -> update.optJSONObject("file")?.let(::publishFile)
             "updateUser" -> update.optJSONObject("user")?.let(::updateUser)
             "updateNotification" -> publishNotification(update)
@@ -564,6 +631,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val content = update.optJSONObject("new_content") ?: return
         val type = content.optString("@type")
         val media = mediaInfo(content, type)
+        val entities = parseEntities(content.optJSONObject("text") ?: content.optJSONObject("caption"))
         // Photos are small, frequently viewed conversation content and should
         // be available without an extra tap. Larger media still follows the
         // user's automatic-download setting to avoid filling the TDLib cache.
@@ -576,8 +644,24 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             mediaFileId = media?.fileId,
             mediaPath = media?.fileId?.let(filePaths::get),
             mediaName = media?.name,
+            entities = entities,
         ) ?: return
         _messages.value = _messages.value + (chatId to current.map { if (it.id == messageId) replacement else it })
+    }
+
+    private fun deletePublishedMessages(update: JSONObject) {
+        val chatId = update.optLong("chat_id")
+        val messageIds = update.optJSONArray("message_ids") ?: return
+        val ids = (0 until messageIds.length()).map { messageIds.optLong(it) }.toSet()
+        _messages.value = _messages.value + (chatId to _messages.value[chatId].orEmpty().filterNot { it.id in ids })
+    }
+
+    private fun updateMessagePinned(update: JSONObject) {
+        val chatId = update.optLong("chat_id")
+        val messageId = update.optLong("message_id")
+        val isPinned = update.optBoolean("is_pinned")
+        val current = _messages.value[chatId].orEmpty()
+        _messages.value = _messages.value + (chatId to current.map { if (it.id == messageId) it.copy(isPinned = isPinned) else it })
     }
 
     private fun publishFile(file: JSONObject) {
@@ -678,7 +762,9 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private fun mapMessage(message: JSONObject, parentChatId: Long? = null, channelPost: Boolean = false): MessageSummary? {
         val content = message.optJSONObject("content") ?: return null
         val type = content.optString("@type")
-        val text = contentText(content)
+        val textObject = content.optJSONObject("text") ?: content.optJSONObject("caption")
+        val text = textObject?.optString("text").orEmpty()
+        val entities = parseEntities(textObject)
         val media = mediaInfo(content, type)
         // Keep channel posts even when their media type has no text caption
         // (polls, stickers, albums, paid media, and newer TDLib content types).
@@ -711,7 +797,47 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             mediaFileId = media?.fileId,
             mediaPath = media?.fileId?.let(filePaths::get),
             mediaName = media?.name,
+            entities = entities,
+            replyToMessageId = message.optJSONObject("reply_to")?.optLong("message_id")?.takeIf { it > 0L },
+            canEdit = message.optBoolean("can_be_edited") || (message.optBoolean("is_outgoing") && type == "messageText"),
+            canDelete = message.optBoolean("can_be_deleted_for_all_users") || message.optBoolean("can_be_deleted_only_for_self") || message.optBoolean("is_outgoing"),
+            canForward = message.optBoolean("can_be_forwarded", true),
+            isPinned = message.optBoolean("is_pinned"),
         )
+    }
+
+    private fun formattedText(text: String, entities: List<MessageEntity>): JSONObject =
+        JSONObject()
+            .put("@type", "formattedText")
+            .put("text", text)
+            .put("entities", JSONArray().apply { entities.forEach { put(it.toJson()) } })
+
+    private fun MessageEntity.toJson(): JSONObject {
+        val entityType = JSONObject().put("@type", type)
+        when (type) {
+            "textEntityTypeTextUrl" -> entityType.put("url", argument.orEmpty())
+            "textEntityTypePreCode" -> entityType.put("language", argument.orEmpty())
+            "textEntityTypeCustomEmoji" -> entityType.put("custom_emoji_id", argument.orEmpty())
+        }
+        return JSONObject().put("@type", "textEntity").put("offset", offset).put("length", length).put("type", entityType)
+    }
+
+    private fun parseEntities(textObject: JSONObject?): List<MessageEntity> {
+        val entities = textObject?.optJSONArray("entities") ?: return emptyList()
+        return (0 until entities.length()).mapNotNull { index ->
+            val entity = entities.optJSONObject(index) ?: return@mapNotNull null
+            val type = entity.optJSONObject("type") ?: return@mapNotNull null
+            MessageEntity(
+                offset = entity.optInt("offset"),
+                length = entity.optInt("length"),
+                type = type.optString("@type"),
+                argument = type.optString("url").ifBlank {
+                    type.optString("language").ifBlank {
+                        type.optString("custom_emoji_id").ifBlank { null }
+                    }
+                },
+            )
+        }
     }
 
     private fun contentText(content: JSONObject?): String {

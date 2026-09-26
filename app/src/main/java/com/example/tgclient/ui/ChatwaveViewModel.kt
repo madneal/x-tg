@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.tgclient.data.TelegramRepository
 import com.example.tgclient.model.AuthState
+import com.example.tgclient.model.MessageEntity
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -51,6 +52,14 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun closeChat(chatId: Long) = repository.closeChat(chatId)
     fun loadGroupActivityStats(chatId: Long) = viewModelScope.launch { repository.loadGroupActivityStats(chatId) }
     fun sendMessage(chatId: Long, text: String) = repository.sendText(chatId, text)
+    fun sendMessage(chatId: Long, text: String, entities: List<MessageEntity>, replyToMessageId: Long? = null) =
+        repository.sendText(chatId, text, entities, replyToMessageId)
+    fun editMessage(chatId: Long, messageId: Long, text: String, entities: List<MessageEntity>) =
+        repository.editMessageText(chatId, messageId, text, entities)
+    fun deleteMessage(chatId: Long, messageId: Long) = repository.deleteMessage(chatId, messageId)
+    fun forwardMessageToSaved(chatId: Long, messageId: Long) = repository.forwardMessageToSaved(chatId, messageId)
+    fun toggleMessagePinned(chatId: Long, messageId: Long, pinned: Boolean) = repository.toggleMessagePinned(chatId, messageId, pinned)
+    fun toggleMessageReaction(chatId: Long, messageId: Long) = repository.toggleMessageReaction(chatId, messageId)
     fun sendLocalMedia(chatId: Long, path: String, mimeType: String) = repository.sendLocalMedia(chatId, path, mimeType)
     fun downloadFile(fileId: Int) = repository.downloadFile(fileId)
     fun createChatFolder(title: String) = repository.createChatFolder(title)

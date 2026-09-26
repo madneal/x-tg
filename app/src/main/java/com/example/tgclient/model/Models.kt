@@ -69,6 +69,20 @@ data class MessageSummary(
     val mediaFileId: Int? = null,
     val mediaPath: String? = null,
     val mediaName: String? = null,
+    val entities: List<MessageEntity> = emptyList(),
+    val replyToMessageId: Long? = null,
+    val canEdit: Boolean = false,
+    val canDelete: Boolean = false,
+    val canForward: Boolean = true,
+    val isPinned: Boolean = false,
+)
+
+/** A TDLib text entity, kept separate from TDLib JSON for immutable UI state. */
+data class MessageEntity(
+    val offset: Int,
+    val length: Int,
+    val type: String,
+    val argument: String? = null,
 )
 
 enum class MediaType { PHOTO, VIDEO, DOCUMENT, AUDIO, VOICE, LOCATION }

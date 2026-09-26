@@ -50,6 +50,7 @@ fun AuthScreen(state: AuthState, viewModel: ChatwaveViewModel, accountManager: T
     var showRemoveDialog by rememberSaveable(activeAccountId) { mutableStateOf(false) }
     val verification by viewModel.verification.collectAsStateWithLifecycle()
     val authAction by viewModel.authAction.collectAsStateWithLifecycle()
+    val authError by viewModel.authError.collectAsStateWithLifecycle()
     val authStep = when (state) {
         AuthState.WaitPhoneNumber -> "phone"
         AuthState.WaitCode -> "code"
@@ -129,11 +130,19 @@ fun AuthScreen(state: AuthState, viewModel: ChatwaveViewModel, accountManager: T
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp, bottom = 20.dp),
                     )
+                    authError?.takeIf { it.isNotBlank() }?.let { message ->
+                        Text(
+                            message,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(bottom = 12.dp),
+                        )
+                    }
                     val canChangePhone = state != AuthState.WaitPhoneNumber &&
                         state != AuthState.Loading &&
                         state != AuthState.LoggingOut &&
                         state != AuthState.MissingConfiguration &&
-                        state != AuthState.Ready
+                        state != AuthState.Ready &&
+                        authError == null
                     if (showPhoneEditor) {
                         Text("Use a different phone number for this account.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         AuthField(

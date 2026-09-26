@@ -22,6 +22,7 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     val currentUser = repository.currentUser
     val verification = repository.verification
     val authAction = repository.authAction
+    val authError = repository.authError
     val groupActivity = repository.groupActivity
 
     val ready: StateFlow<Boolean> = authState

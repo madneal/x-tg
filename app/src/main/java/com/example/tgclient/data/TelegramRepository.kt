@@ -44,8 +44,10 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val _currentUser = MutableStateFlow<TelegramUser?>(null)
     private val _verification = MutableStateFlow(VerificationCodeState())
     private val _authAction = MutableStateFlow(AuthAction.None)
+    private val _authError = MutableStateFlow<String?>(null)
     private val authActionGuard = AtomicReference(AuthAction.None)
     private val authStateVersion = MutableStateFlow(0L)
+    private val lastStableAuthState = AtomicReference<AuthState>(AuthState.Loading)
     private val _groupActivity = MutableStateFlow<Map<Long, GroupActivityState>>(emptyMap())
     private val _transfers = MutableStateFlow<Map<Int, TransferState>>(emptyMap())
     private val settingsPreferences = context.getSharedPreferences("chatwave_settings", Context.MODE_PRIVATE)
@@ -65,6 +67,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     val currentUser: StateFlow<TelegramUser?> = _currentUser.asStateFlow()
     val verification: StateFlow<VerificationCodeState> = _verification.asStateFlow()
     val authAction: StateFlow<AuthAction> = _authAction.asStateFlow()
+    val authError: StateFlow<String?> = _authError.asStateFlow()
     val groupActivity: StateFlow<Map<Long, GroupActivityState>> = _groupActivity.asStateFlow()
     val transfers: StateFlow<Map<Int, TransferState>> = _transfers.asStateFlow()
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
@@ -129,6 +132,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
      */
     private fun runAuthRequest(action: AuthAction, type: String, fields: JSONObject = JSONObject()) {
         if (client == null || !authActionGuard.compareAndSet(AuthAction.None, action)) return
+        _authError.value = null
         _authAction.value = action
         val requestStateVersion = authStateVersion.value
         repositoryScope.launch {
@@ -143,13 +147,24 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: TelegramException) {
-                _authState.value = AuthState.Error(error.message)
+                showAuthRequestError(error.message)
             } catch (_: Exception) {
-                _authState.value = AuthState.Error("Unable to contact Telegram. Please try again.")
+                showAuthRequestError("Unable to contact Telegram. Please try again.")
             } finally {
                 authActionGuard.compareAndSet(action, AuthAction.None)
                 _authAction.value = AuthAction.None
             }
+        }
+    }
+
+    private fun showAuthRequestError(message: String) {
+        // Keep TDLib's current authorization state visible. Replacing a wait-code state with
+        // AuthState.Error caused the UI's generic retry button to call
+        // setAuthenticationPhoneNumber again, which TDLib rejects as an unexpected request.
+        if (lastStableAuthState.get() !is AuthState.Loading) {
+            _authError.value = message
+        } else {
+            _authState.value = AuthState.Error(message)
         }
     }
 
@@ -607,6 +622,10 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 authStateVersion.value += 1
                 val mappedState = AuthStateMapper.fromJson(authorizationState)
                 _authState.value = mappedState
+                if (mappedState !is AuthState.Loading && mappedState !is AuthState.LoggingOut && mappedState !is AuthState.Error) {
+                    lastStableAuthState.set(mappedState)
+                }
+                _authError.value = null
                 if (mappedState is AuthState.Ready) repositoryScope.launch { loadCurrentUser() }
             }
             "updateNewChat" -> update.optJSONObject("chat")?.let { chatCache[it.optLong("id")] = it; publishChats() }

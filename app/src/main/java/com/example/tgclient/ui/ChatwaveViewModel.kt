@@ -84,6 +84,8 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun updateLinkPreviews(enabled: Boolean) = repository.updateSettings { it.copy(linkPreviews = enabled) }
     fun updateReduceAnimations(enabled: Boolean) = repository.updateSettings { it.copy(reduceAnimations = enabled) }
     fun updateLanguage(language: String) = repository.updateSettings { it.copy(language = language) }
+    fun updateRetainDeletedMessages(enabled: Boolean) = repository.updateSettings { it.copy(retainDeletedMessages = enabled) }
+    fun clearRetainedMessages() = repository.clearRetainedMessages()
 
     companion object {
         fun factory(repository: TelegramRepository): ViewModelProvider.Factory =

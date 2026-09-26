@@ -84,6 +84,7 @@ fun SettingsScreen(
     val updateState by updateManager.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var showLanguageDialog by remember { mutableStateOf(false) }
+    var showClearRetainedDialog by remember { mutableStateOf(false) }
     var accountToRemove by remember { mutableStateOf<AccountSummary?>(null) }
     var accountSetting by remember { mutableStateOf<AccountSetting?>(null) }
     var profileFirstName by rememberSaveable(activeAccountId) { mutableStateOf("") }
@@ -192,6 +193,13 @@ fun SettingsScreen(
                 SettingToggle(Icons.Default.Download, "Automatic media download", "Download media when connected", settings.autoDownloadMedia, viewModel::updateAutoDownload)
                 SettingToggle(Icons.Default.Photo, "Save to gallery", "Save received photos and videos to the gallery", settings.saveToGallery, viewModel::updateSaveToGallery)
                 SettingToggle(Icons.Default.DataUsage, "Use less data", "Prefer smaller media and fewer background transfers", settings.useLessData, viewModel::updateUseLessData)
+                SettingToggle(Icons.Default.Lock, "Keep deleted messages", "Keep an encrypted local copy when a message is deleted", settings.retainDeletedMessages, viewModel::updateRetainDeletedMessages)
+                SettingInfo(
+                    Icons.Outlined.DeleteOutline,
+                    "Clear retained messages",
+                    "Delete local copies of messages already removed from Telegram",
+                    modifier = Modifier.clickable { showClearRetainedDialog = true },
+                )
                 SettingInfo(Icons.Default.Storage, "Storage usage", "Cached media is kept in the app's private storage")
             }
 
@@ -281,6 +289,21 @@ fun SettingsScreen(
                 }
             },
             confirmButton = { TextButton(onClick = { showLanguageDialog = false }) { Text("Cancel") } },
+        )
+    }
+
+    if (showClearRetainedDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearRetainedDialog = false },
+            title = { Text("Clear retained messages?") },
+            text = { Text("This deletes the encrypted local copies kept by Chatwave. Telegram messages are not changed.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.clearRetainedMessages()
+                    showClearRetainedDialog = false
+                }) { Text("Clear") }
+            },
+            dismissButton = { TextButton(onClick = { showClearRetainedDialog = false }) { Text("Cancel") } },
         )
     }
 

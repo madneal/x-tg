@@ -668,6 +668,9 @@ private fun MessageBubble(
             horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start,
         ) {
             if (!outgoing && !mergeWithPrevious) Text(message.senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+            if (message.isDeleted) {
+                Text("Deleted message · kept locally", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 3.dp))
+            }
             message.replyToMessageId?.let {
                 Text("↪ Reply", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 3.dp))
             }

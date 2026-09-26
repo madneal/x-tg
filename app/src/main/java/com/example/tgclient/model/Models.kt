@@ -75,6 +75,7 @@ data class MessageSummary(
     val canDelete: Boolean = false,
     val canForward: Boolean = true,
     val isPinned: Boolean = false,
+    val isDeleted: Boolean = false,
 )
 
 /** A TDLib text entity, kept separate from TDLib JSON for immutable UI state. */
@@ -115,6 +116,7 @@ data class AppSettings(
     val linkPreviews: Boolean = true,
     val reduceAnimations: Boolean = false,
     val language: String = "System default",
+    val retainDeletedMessages: Boolean = true,
 )
 
 data class TransferState(

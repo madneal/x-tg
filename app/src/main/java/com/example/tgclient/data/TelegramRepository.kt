@@ -17,6 +17,7 @@ import com.example.tgclient.model.TransferState
 import com.example.tgclient.model.VerificationCodeState
 import com.example.tgclient.notifications.TelegramNotificationController
 import com.example.tgclient.security.DatabaseKeyStore
+import com.example.tgclient.security.MessageRetentionStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,6 +38,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val repositoryScope = scope
     private val client: TdLibClient?
     private val notificationController = TelegramNotificationController(context)
+    private val messageRetentionStore = MessageRetentionStore(context, accountId)
     private val _authState = MutableStateFlow<AuthState>(AuthState.Loading)
     private val _chats = MutableStateFlow<List<ChatSummary>>(emptyList())
     private val _messages = MutableStateFlow<Map<Long, List<MessageSummary>>>(emptyMap())
@@ -345,8 +347,10 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 fromMessageId = nextFromMessageId
                 pageCount += 1
             }
+            if (_settings.value.retainDeletedMessages) loaded.forEach(messageRetentionStore::save)
             val merged = mergeMessages(_messages.value[chatId].orEmpty(), loaded)
-            _messages.value = _messages.value + (chatId to merged)
+            val retained = if (_settings.value.retainDeletedMessages) messageRetentionStore.loadChat(chatId) else emptyList()
+            _messages.value = _messages.value + (chatId to mergeMessages(merged, retained))
         }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
     }
 
@@ -569,9 +573,17 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             ?: emptyList()
     }.getOrDefault(emptyList())
 
+    fun clearRetainedMessages() {
+        messageRetentionStore.clear()
+        _messages.value = _messages.value.mapValues { (_, messages) -> messages.filterNot { it.isDeleted } }
+    }
+
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
         val updated = transform(_settings.value)
         _settings.value = updated
+        if (!updated.retainDeletedMessages) {
+            _messages.value = _messages.value.mapValues { (_, messages) -> messages.filterNot { it.isDeleted } }
+        }
         settingsPreferences.edit()
             .putBoolean("darkTheme", updated.darkTheme)
             .putBoolean("dynamicColors", updated.dynamicColors)
@@ -586,6 +598,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             .putBoolean("linkPreviews", updated.linkPreviews)
             .putBoolean("reduceAnimations", updated.reduceAnimations)
             .putString("language", updated.language)
+            .putBoolean("retainDeletedMessages", updated.retainDeletedMessages)
             .apply()
     }
 
@@ -603,6 +616,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         linkPreviews = settingsPreferences.getBoolean("linkPreviews", true),
         reduceAnimations = settingsPreferences.getBoolean("reduceAnimations", false),
         language = settingsPreferences.getString("language", "System default") ?: "System default",
+        retainDeletedMessages = settingsPreferences.getBoolean("retainDeletedMessages", true),
     )
 
     private fun handleUpdate(update: JSONObject) {
@@ -651,6 +665,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val chatId = message.optLong("chat_id").takeIf { it != 0L } ?: return
         val isChannel = chatCache[chatId]?.isChannelChat() == true
         val mapped = mapMessage(message, chatId, isChannel) ?: return
+        if (_settings.value.retainDeletedMessages) messageRetentionStore.save(mapped)
         val current = _messages.value[chatId].orEmpty()
         _messages.value = _messages.value + (chatId to mergeMessages(current, listOf(mapped)))
     }
@@ -677,6 +692,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             mediaName = media?.name,
             entities = entities,
         ) ?: return
+        if (_settings.value.retainDeletedMessages) messageRetentionStore.save(replacement)
         _messages.value = _messages.value + (chatId to current.map { if (it.id == messageId) replacement else it })
     }
 
@@ -684,7 +700,13 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val chatId = update.optLong("chat_id")
         val messageIds = update.optJSONArray("message_ids") ?: return
         val ids = (0 until messageIds.length()).map { messageIds.optLong(it) }.toSet()
-        _messages.value = _messages.value + (chatId to _messages.value[chatId].orEmpty().filterNot { it.id in ids })
+        if (_settings.value.retainDeletedMessages) {
+            messageRetentionStore.markDeleted(chatId, ids)
+            val current = _messages.value[chatId].orEmpty()
+            _messages.value = _messages.value + (chatId to current.map { message -> if (message.id in ids) message.copy(isDeleted = true) else message })
+        } else {
+            _messages.value = _messages.value + (chatId to _messages.value[chatId].orEmpty().filterNot { it.id in ids })
+        }
     }
 
     private fun updateMessagePinned(update: JSONObject) {
@@ -709,6 +731,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 if (message.mediaFileId == id) message.copy(mediaPath = path ?: message.mediaPath) else message
             }
         }
+        if (_settings.value.retainDeletedMessages && path != null) messageRetentionStore.updateMediaPath(id, path)
     }
 
     private fun publishNotification(update: JSONObject) {
@@ -939,7 +962,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         if (this == null) emptyList() else (0 until length()).mapNotNull { mapMessage(optJSONObject(it) ?: JSONObject()) }
 
     private fun mergeMessages(existing: List<MessageSummary>, incoming: List<MessageSummary>): List<MessageSummary> =
-        (existing + incoming).filter { it.id != 0L }.distinctBy { it.id }.sortedBy { it.id }
+        (existing + incoming).filter { it.id != 0L }.associateBy { it.id }.values.sortedBy { it.id }
 
     private fun JSONObject.isChannelChat(): Boolean =
         optJSONObject("type")?.let { type ->

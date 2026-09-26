@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -41,6 +40,7 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.ExitToApp
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -119,6 +119,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     var confirmDeleteMessage by remember { mutableStateOf<MessageSummary?>(null) }
     var replyTarget by remember { mutableStateOf<MessageSummary?>(null) }
     var editingTarget by remember { mutableStateOf<MessageSummary?>(null) }
+    var pendingMedia by remember { mutableStateOf<PendingMedia?>(null) }
     var showLinkDialog by remember { mutableStateOf(false) }
     var linkUrl by remember { mutableStateOf("") }
     val clipboardManager = LocalClipboardManager.current
@@ -143,16 +144,13 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
         uri ?: return@rememberLauncherForActivityResult
         val path = uri.copyToCache(context)
         if (path != null) {
-            viewModel.sendLocalMedia(
-                chatId = chatId,
+            pendingMedia = PendingMedia(
                 path = path,
                 mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream",
-                replyToMessageId = replyTarget?.id,
             )
-            // Sending an attachment completes the pending reply just like sending text.
-            replyTarget = null
+            // An attachment is composed before it is sent. Editing and attaching at the same
+            // time is ambiguous, so switch back to the normal send composer.
             editingTarget = null
-            draft = TextFieldValue()
         }
     }
     LaunchedEffect(chatId) { viewModel.openChat(chatId) }
@@ -233,7 +231,10 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
         },
         bottomBar = {
             Surface(color = MaterialTheme.colorScheme.surface, shadowElevation = 8.dp) {
-                Column(modifier = Modifier.navigationBarsPadding().imePadding()) {
+                // Scaffold already accounts for the navigation bar. Applying both navigation
+                // and IME padding here created a second bottom inset and a large blank area
+                // above the keyboard on edge-to-edge Android windows.
+                Column(modifier = Modifier.imePadding()) {
                     if (replyTarget != null || editingTarget != null) {
                         val target = editingTarget ?: replyTarget
                         Row(
@@ -246,6 +247,12 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                             }
                             TextButton(onClick = { replyTarget = null; editingTarget = null; draft = TextFieldValue() }) { Text("Cancel") }
                         }
+                    }
+                    pendingMedia?.let { media ->
+                        PendingMediaPreview(
+                            media = media,
+                            onRemove = { pendingMedia = null },
+                        )
                     }
                     if (draft.text.isNotEmpty()) {
                         RichTextToolbar(
@@ -269,11 +276,20 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                         maxLines = 5,
                         keyboardOptions = KeyboardOptions(imeAction = if (settings.sendByEnter) ImeAction.Send else ImeAction.Default),
                         keyboardActions = KeyboardActions(onSend = {
-                            if (settings.sendByEnter) sendDraft(viewModel, chatId, draft, editingTarget, replyTarget) {
-                                draft = TextFieldValue()
-                                editingTarget = null
-                                replyTarget = null
-                            }
+                            if (settings.sendByEnter) sendComposer(
+                                viewModel = viewModel,
+                                chatId = chatId,
+                                draft = draft,
+                                pendingMedia = pendingMedia,
+                                editingTarget = editingTarget,
+                                replyTarget = replyTarget,
+                                onSent = {
+                                    draft = TextFieldValue()
+                                    pendingMedia = null
+                                    editingTarget = null
+                                    replyTarget = null
+                                },
+                            )
                         }),
                         shape = RoundedCornerShape(24.dp),
                         trailingIcon = {
@@ -289,15 +305,25 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                     Spacer(Modifier.size(6.dp))
                     IconButton(
                         onClick = {
-                            if (draft.text.isNotBlank()) sendDraft(viewModel, chatId, draft, editingTarget, replyTarget) {
-                                draft = TextFieldValue()
-                                editingTarget = null
-                                replyTarget = null
-                            }
+                            sendComposer(
+                                viewModel = viewModel,
+                                chatId = chatId,
+                                draft = draft,
+                                pendingMedia = pendingMedia,
+                                editingTarget = editingTarget,
+                                replyTarget = replyTarget,
+                                onSent = {
+                                    draft = TextFieldValue()
+                                    pendingMedia = null
+                                    editingTarget = null
+                                    replyTarget = null
+                                },
+                            )
                         },
                         modifier = Modifier.size(48.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
                     ) {
-                        Icon(if (draft.text.isBlank()) Icons.Default.Mic else Icons.Default.Send, contentDescription = if (draft.text.isBlank()) "Voice message" else "Send", tint = MaterialTheme.colorScheme.onPrimary)
+                        val canSend = draft.text.isNotBlank() || pendingMedia != null
+                        Icon(if (canSend) Icons.Default.Send else Icons.Default.Mic, contentDescription = if (canSend) "Send" else "Voice message", tint = MaterialTheme.colorScheme.onPrimary)
                     }
                 }
             }
@@ -552,6 +578,47 @@ private fun android.net.Uri.copyToCache(context: android.content.Context): Strin
     target.absolutePath
 }.getOrNull()
 
+private data class PendingMedia(
+    val path: String,
+    val mimeType: String,
+)
+
+@Composable
+private fun PendingMediaPreview(media: PendingMedia, onRemove: () -> Unit) {
+    val bitmap = remember(media.path) {
+        if (media.mimeType.startsWith("image/")) android.graphics.BitmapFactory.decodeFile(media.path) else null
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "Selected photo",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(58.dp).clip(RoundedCornerShape(9.dp)),
+                )
+            } else {
+                Icon(Icons.Default.AttachFile, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp))
+            }
+            Spacer(Modifier.size(8.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Ready to send", style = MaterialTheme.typography.labelLarge)
+                Text(media.mimeType.substringAfter('/').uppercase(Locale.getDefault()), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            IconButton(onClick = onRemove) {
+                Icon(Icons.Default.Close, contentDescription = "Remove attachment")
+            }
+        }
+    }
+}
+
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 private fun MessageBubble(
@@ -702,6 +769,29 @@ private fun sendDraft(
         viewModel.sendMessage(chatId, draft.text, entities, replyTarget?.id)
     }
     onSent()
+}
+
+private fun sendComposer(
+    viewModel: ChatwaveViewModel,
+    chatId: Long,
+    draft: TextFieldValue,
+    pendingMedia: PendingMedia?,
+    editingTarget: MessageSummary?,
+    replyTarget: MessageSummary?,
+    onSent: () -> Unit,
+) {
+    if (pendingMedia != null) {
+        viewModel.sendLocalMedia(
+            chatId = chatId,
+            path = pendingMedia.path,
+            mimeType = pendingMedia.mimeType,
+            caption = draft.text,
+            replyToMessageId = replyTarget?.id,
+        )
+        onSent()
+    } else {
+        sendDraft(viewModel, chatId, draft, editingTarget, replyTarget, onSent)
+    }
 }
 
 private fun AnnotatedString.toMessageEntities(): List<MessageEntity> =

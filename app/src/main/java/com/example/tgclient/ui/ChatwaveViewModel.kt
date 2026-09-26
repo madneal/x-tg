@@ -60,8 +60,8 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun forwardMessageToSaved(chatId: Long, messageId: Long) = repository.forwardMessageToSaved(chatId, messageId)
     fun toggleMessagePinned(chatId: Long, messageId: Long, pinned: Boolean) = repository.toggleMessagePinned(chatId, messageId, pinned)
     fun toggleMessageReaction(chatId: Long, messageId: Long) = repository.toggleMessageReaction(chatId, messageId)
-    fun sendLocalMedia(chatId: Long, path: String, mimeType: String, replyToMessageId: Long? = null) =
-        repository.sendLocalMedia(chatId, path, mimeType, replyToMessageId = replyToMessageId)
+    fun sendLocalMedia(chatId: Long, path: String, mimeType: String, caption: String = "", replyToMessageId: Long? = null) =
+        repository.sendLocalMedia(chatId, path, mimeType, caption = caption, replyToMessageId = replyToMessageId)
     fun downloadFile(fileId: Int) = repository.downloadFile(fileId)
     fun createChatFolder(title: String) = repository.createChatFolder(title)
     fun renameChatFolder(folderId: String, title: String) = repository.renameChatFolder(folderId, title)

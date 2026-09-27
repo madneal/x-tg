@@ -53,6 +53,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val _verification = MutableStateFlow(VerificationCodeState())
     private val _authAction = MutableStateFlow(AuthAction.None)
     private val _authError = MutableStateFlow<String?>(null)
+    private val _operationError = MutableStateFlow<String?>(null)
     private val authActionGuard = AtomicReference(AuthAction.None)
     private val authStateVersion = MutableStateFlow(0L)
     private val lastStableAuthState = AtomicReference<AuthState>(AuthState.Loading)
@@ -69,6 +70,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val savedGalleryFiles = ConcurrentHashMap.newKeySet<Int>()
     private val requestedUsers = ConcurrentHashMap.newKeySet<Long>()
     private val localPinOverrides = ConcurrentHashMap<Long, Boolean>()
+    private val historyCursors = ConcurrentHashMap<Long, HistoryCursor>()
 
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
     val chats: StateFlow<List<ChatSummary>> = _chats.asStateFlow()
@@ -78,6 +80,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     val verification: StateFlow<VerificationCodeState> = _verification.asStateFlow()
     val authAction: StateFlow<AuthAction> = _authAction.asStateFlow()
     val authError: StateFlow<String?> = _authError.asStateFlow()
+    val operationError: StateFlow<String?> = _operationError.asStateFlow()
     val groupActivity: StateFlow<Map<Long, GroupActivityState>> = _groupActivity.asStateFlow()
     val transfers: StateFlow<Map<Int, TransferState>> = _transfers.asStateFlow()
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
@@ -178,6 +181,11 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         }
     }
 
+    /** Data requests must never replace a valid authorization state with a login screen. */
+    private fun reportOperationError(error: Throwable) {
+        _operationError.value = error.safeMessage()
+    }
+
     suspend fun updateProfile(firstName: String, lastName: String, username: String) {
         runCatching {
             client?.request("setName", JSONObject().put("first_name", firstName).put("last_name", lastName))
@@ -247,10 +255,11 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             runCatching { client?.request("leaveChat", JSONObject().put("chat_id", chatId)) }
                 .onSuccess {
                     chatCache.remove(chatId)
+                    historyCursors.remove(chatId)
                     _messages.value = _messages.value - chatId
                     publishChats()
                 }
-                .onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+                .onFailure(::reportOperationError)
         }
     }
 
@@ -265,8 +274,9 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                         .put("revoke", false),
                 )
             }.onSuccess {
+                historyCursors.remove(chatId)
                 _messages.value = _messages.value + (chatId to emptyList())
-            }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+            }.onFailure(::reportOperationError)
         }
     }
 
@@ -283,7 +293,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             }.onSuccess {
                 localPinOverrides[chatId] = pinned
                 publishChats()
-            }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+            }.onFailure(::reportOperationError)
         }
     }
 
@@ -297,17 +307,18 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             }.onSuccess {
                 chatCache[chatId]?.put("is_marked_as_unread", markedAsUnread)
                 publishChats()
-            }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+            }.onFailure(::reportOperationError)
         }
     }
 
     suspend fun loadChats(limit: Int = 100) {
         runCatching {
             client?.request("getChats", JSONObject().put("chat_list", JSONObject().put("@type", "chatListMain")).put("limit", limit))
-        }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+        }.onFailure(::reportOperationError)
     }
 
     suspend fun loadMessages(chatId: Long, limit: Int = 50) {
+        val cursor = beginHistoryLoad(chatId, initial = true) ?: return
         runCatching {
             // Supergroups and channels only receive their full chat updates
             // after the chat has been opened. Open it before requesting the
@@ -323,38 +334,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 publishChats()
             }
             val isChannel = chat?.isChannelChat() ?: chatCache[chatId]?.isChannelChat() == true
-            val pageLimit = limit.coerceIn(1, 100)
-            val loaded = mutableListOf<MessageSummary>()
-            var fromMessageId = 0L
-            var pageCount = 0
-            var retriedInitialHistory = false
-            while (loaded.size < limit && pageCount < MAX_HISTORY_PAGES) {
-                val result = client?.request(
-                    "getChatHistory",
-                    JSONObject()
-                        .put("chat_id", chatId)
-                        .put("from_message_id", fromMessageId)
-                        .put("offset", 0)
-                        .put("limit", pageLimit)
-                        .put("only_local", false),
-                ) ?: break
-                val messages = result.optJSONArray("messages") ?: break
-                if (messages.length() == 0) break
-                loaded += messages.toMessageList(chatId, isChannel)
-                val nextFromMessageId = messages.optJSONObject(messages.length() - 1)?.optLong("id") ?: 0L
-                // TDLib can return only the latest channel post while it is
-                // filling the local history database. Repeat the initial
-                // request once so the following response contains the rest
-                // of the available page instead of stopping at one message.
-                if (fromMessageId == 0L && !retriedInitialHistory && messages.length() < pageLimit && nextFromMessageId > 0L) {
-                    retriedInitialHistory = true
-                    pageCount += 1
-                    continue
-                }
-                if (nextFromMessageId <= 0L || nextFromMessageId == fromMessageId) break
-                fromMessageId = nextFromMessageId
-                pageCount += 1
-            }
+            val batch = fetchHistory(chatId, isChannel, limit, cursor.oldestMessageId, initial = true)
+            val loaded = batch.messages
             if (_settings.value.retainDeletedMessages) withContext(Dispatchers.IO) { messageRetentionStore.saveAll(loaded) }
             if (_settings.value.saveToGallery) loaded.forEach(::maybeAutoSaveMedia)
             val merged = mergeMessages(_messages.value[chatId].orEmpty(), loaded)
@@ -364,7 +345,29 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 emptyList()
             }
             _messages.value = _messages.value + (chatId to mergeMessages(merged, retained))
-        }.onFailure { _authState.value = AuthState.Error(it.safeMessage()) }
+            updateHistoryCursor(cursor, batch, initial = true)
+        }.onFailure(::reportOperationError)
+            .also { finishHistoryLoad(cursor) }
+    }
+
+    /** Loads the next older page when the user reaches the top of a conversation. */
+    suspend fun loadOlderMessages(chatId: Long, limit: Int = 50) {
+        val cursor = beginHistoryLoad(chatId, initial = false) ?: return
+        runCatching {
+            val isChannel = chatCache[chatId]?.isChannelChat() == true
+            val batch = fetchHistory(chatId, isChannel, limit, cursor.oldestMessageId, initial = false)
+            val loaded = batch.messages
+            if (_settings.value.retainDeletedMessages) withContext(Dispatchers.IO) { messageRetentionStore.saveAll(loaded) }
+            if (_settings.value.saveToGallery) loaded.forEach(::maybeAutoSaveMedia)
+            val retained = if (_settings.value.retainDeletedMessages) {
+                withContext(Dispatchers.IO) { messageRetentionStore.loadChat(chatId) }
+            } else {
+                emptyList()
+            }
+            _messages.value = _messages.value + (chatId to mergeMessages(_messages.value[chatId].orEmpty() + loaded, retained))
+            updateHistoryCursor(cursor, batch, initial = false)
+        }.onFailure(::reportOperationError)
+            .also { finishHistoryLoad(cursor) }
     }
 
     fun closeChat(chatId: Long) {
@@ -1057,6 +1060,109 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     private data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
+
+    private data class HistoryCursor(
+        var oldestMessageId: Long = 0L,
+        var hasMore: Boolean = true,
+        var initialLoaded: Boolean = false,
+        var loading: Boolean = false,
+    )
+
+    private data class HistoryBatch(
+        val messages: List<MessageSummary>,
+        val oldestMessageId: Long,
+        val hasMore: Boolean,
+    )
+
+    private fun beginHistoryLoad(chatId: Long, initial: Boolean): HistoryCursor? {
+        val cursor = historyCursors.computeIfAbsent(chatId) { HistoryCursor() }
+        synchronized(cursor) {
+            if (cursor.loading) return null
+            if (!initial && (!cursor.initialLoaded || !cursor.hasMore || cursor.oldestMessageId <= 0L)) return null
+            cursor.loading = true
+            if (initial) {
+                cursor.oldestMessageId = 0L
+                cursor.hasMore = true
+                cursor.initialLoaded = false
+            }
+        }
+        return cursor
+    }
+
+    private fun finishHistoryLoad(cursor: HistoryCursor) {
+        synchronized(cursor) { cursor.loading = false }
+    }
+
+    private fun updateHistoryCursor(cursor: HistoryCursor, batch: HistoryBatch, initial: Boolean) {
+        synchronized(cursor) {
+            if (batch.oldestMessageId > 0L) {
+                cursor.oldestMessageId = if (initial || cursor.oldestMessageId <= 0L) {
+                    batch.oldestMessageId
+                } else {
+                    minOf(cursor.oldestMessageId, batch.oldestMessageId)
+                }
+            }
+            cursor.hasMore = batch.hasMore
+            if (initial) cursor.initialLoaded = true
+        }
+    }
+
+    private suspend fun fetchHistory(
+        chatId: Long,
+        channelPost: Boolean,
+        limit: Int,
+        initialFromMessageId: Long,
+        initial: Boolean,
+    ): HistoryBatch {
+        val pageLimit = limit.coerceIn(1, 100)
+        val requestedCount = limit.coerceAtLeast(1)
+        val loaded = mutableListOf<MessageSummary>()
+        var fromMessageId = initialFromMessageId
+        var oldestMessageId = 0L
+        var pageCount = 0
+        var retriedInitialHistory = false
+        var hasMore = true
+        while (loaded.size < requestedCount && pageCount < MAX_HISTORY_PAGES) {
+            val result = client?.request(
+                "getChatHistory",
+                JSONObject()
+                    .put("chat_id", chatId)
+                    .put("from_message_id", fromMessageId)
+                    .put("offset", 0)
+                    .put("limit", pageLimit)
+                    .put("only_local", false),
+            ) ?: break
+            val messages = result.optJSONArray("messages")
+            if (messages == null || messages.length() == 0) {
+                hasMore = false
+                break
+            }
+
+            val pageIds = (0 until messages.length())
+                .mapNotNull { index -> messages.optJSONObject(index)?.optLong("id")?.takeIf { it > 0L } }
+            val pageOldestMessageId = pageIds.minOrNull() ?: 0L
+            if (pageOldestMessageId > 0L) {
+                oldestMessageId = if (oldestMessageId == 0L) pageOldestMessageId else minOf(oldestMessageId, pageOldestMessageId)
+            }
+            loaded += messages.toMessageList(chatId, channelPost)
+            pageCount += 1
+
+            // A channel or group may answer the first request with a short page
+            // while TDLib is filling its local database. Repeat that exact
+            // request once before advancing the cursor.
+            if (initial && fromMessageId == 0L && !retriedInitialHistory && messages.length() < pageLimit && pageOldestMessageId > 0L) {
+                retriedInitialHistory = true
+                continue
+            }
+            if (pageOldestMessageId <= 0L || pageOldestMessageId == fromMessageId) {
+                hasMore = false
+                break
+            }
+            fromMessageId = pageOldestMessageId
+        }
+        if (pageCount >= MAX_HISTORY_PAGES && oldestMessageId > 0L) hasMore = true
+        return HistoryBatch(loaded, oldestMessageId, hasMore)
+    }
 
     private fun JSONArray?.toMessageList(chatId: Long, channelPost: Boolean): List<MessageSummary> =
         if (this == null) emptyList() else (0 until length()).mapNotNull { mapMessage(optJSONObject(it) ?: JSONObject(), chatId, channelPost) }

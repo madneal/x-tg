@@ -24,6 +24,7 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     val verification = repository.verification
     val authAction = repository.authAction
     val authError = repository.authError
+    val operationError = repository.operationError
     val groupActivity = repository.groupActivity
 
     val ready: StateFlow<Boolean> = authState
@@ -51,6 +52,7 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun register(firstName: String, lastName: String) = repository.register(firstName, lastName)
     fun logout() = repository.logout()
     fun openChat(chatId: Long) = viewModelScope.launch { repository.loadMessages(chatId) }
+    fun loadOlderMessages(chatId: Long) = viewModelScope.launch { repository.loadOlderMessages(chatId) }
     fun closeChat(chatId: Long) = repository.closeChat(chatId)
     fun loadGroupActivityStats(chatId: Long) = viewModelScope.launch { repository.loadGroupActivityStats(chatId) }
     fun sendMessage(chatId: Long, text: String) = repository.sendText(chatId, text)

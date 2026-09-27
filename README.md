@@ -40,6 +40,10 @@ messaging, search, contacts, groups, notifications, and settings. The feature
 registry in `app/src/main/java/com/example/tgclient/features/FeatureRegistry.kt`
 tracks additional Telegram capabilities as they are implemented.
 
+Conversation history is loaded in pages. Opening a chat positions the list at
+the newest messages, and scrolling to the top requests older pages without
+replacing the authenticated state when a data request temporarily fails.
+
 Multiple Telegram accounts are supported. Use **Settings → Accounts → Add
 account** to start a second phone-number login, then switch accounts from the
 same list. Each account uses an isolated TDLib database, files directory, and

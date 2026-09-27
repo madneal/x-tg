@@ -8,12 +8,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -35,11 +33,11 @@ class TdLibClient(
 ) : Closeable {
     private val context = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val _updates = MutableSharedFlow<JSONObject>(
-        extraBufferCapacity = 256,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
-    val updates: SharedFlow<JSONObject> = _updates.asSharedFlow()
+    // TDLib updates are ordered and must not be dropped. A busy group can
+    // easily exceed a small SharedFlow buffer, which used to lose messages
+    // and even authorization updates while the UI was being recreated.
+    private val updateChannel = Channel<JSONObject>(Channel.UNLIMITED)
+    val updates: Flow<JSONObject> = updateChannel.receiveAsFlow()
     val rawUpdates: Flow<String>
         get() = client.updates
 
@@ -54,7 +52,8 @@ class TdLibClient(
         client = TdKtxClient(30.0, PlatformTdClientEngine())
         scope.launch {
             client.updates.collect { raw ->
-                runCatching { JSONObject(raw) }.onSuccess(_updates::tryEmit)
+                val update = runCatching { JSONObject(raw) }.getOrNull()
+                if (update != null) updateChannel.send(update)
             }
         }
     }
@@ -125,6 +124,7 @@ class TdLibClient(
     override fun close() {
         if (!started) return
         started = false
+        updateChannel.close()
         scope.cancel(CancellationException("TDLib client closed"))
         client.release()
     }

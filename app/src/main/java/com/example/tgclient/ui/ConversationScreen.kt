@@ -68,6 +68,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -94,6 +95,7 @@ import com.example.tgclient.model.MediaType
 import com.example.tgclient.model.MessageEntity
 import com.example.tgclient.model.MessageSummary
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import java.io.File
 import java.time.Instant
 import java.time.LocalDate
@@ -128,6 +130,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     val clipboardManager = LocalClipboardManager.current
     val listState = rememberLazyListState()
     val scrollScope = rememberCoroutineScope()
+    var positionedAtLatest by remember(chatId) { mutableStateOf(false) }
     val chatMessages = messages[chatId].orEmpty()
     val showJumpToLatest by remember(chatMessages.size) {
         derivedStateOf {
@@ -157,6 +160,20 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
         }
     }
     LaunchedEffect(chatId) { viewModel.openChat(chatId) }
+    LaunchedEffect(chatId, chatMessages.size) {
+        if (!positionedAtLatest && chatMessages.isNotEmpty()) {
+            listState.scrollToItem(chatMessages.lastIndex)
+            positionedAtLatest = true
+        }
+    }
+    LaunchedEffect(chatId, chatMessages.size, positionedAtLatest) {
+        if (!positionedAtLatest) return@LaunchedEffect
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .distinctUntilChanged()
+            .collect { firstVisibleIndex ->
+                if (firstVisibleIndex <= 1) viewModel.loadOlderMessages(chatId)
+            }
+    }
     DisposableEffect(chatId) {
         onDispose { viewModel.closeChat(chatId) }
     }

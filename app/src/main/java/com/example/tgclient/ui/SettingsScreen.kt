@@ -106,7 +106,7 @@ fun SettingsScreen(
         ) {
             Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
                 ListItem(
-                    leadingContent = { Avatar(currentUser?.displayName ?: "Chatwave", size = 58.dp, photoPath = currentUser?.avatarPath) },
+                    leadingContent = { Avatar(currentUser?.displayName ?: "Chatwave", size = 58.dp, photoPath = currentUser?.avatarPath, photoRevision = currentUser?.avatarRevision ?: 0L) },
                     headlineContent = { Text(activeAccount?.label ?: "Telegram account", style = MaterialTheme.typography.titleLarge) },
                     supportingContent = { Text("Signed in with your Telegram account") },
                 )

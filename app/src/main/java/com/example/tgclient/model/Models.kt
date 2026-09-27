@@ -7,6 +7,8 @@ data class TelegramUser(
     val phoneNumber: String? = null,
     val avatarFileId: Int? = null,
     val avatarPath: String? = null,
+    /** Changes whenever the local avatar file is replaced, so Compose can invalidate its bitmap cache. */
+    val avatarRevision: Long = 0L,
     val firstName: String = "",
     val lastName: String = "",
 )
@@ -45,6 +47,8 @@ data class ChatSummary(
     val isPrivate: Boolean = false,
     val lastMessage: MessageSummary? = null,
     val photoPath: String? = null,
+    /** Changes whenever the local chat photo file is replaced, so Compose can invalidate its bitmap cache. */
+    val photoRevision: Long = 0L,
 )
 
 /** A local chat folder, similar to Telegram's chat-folder tabs. */

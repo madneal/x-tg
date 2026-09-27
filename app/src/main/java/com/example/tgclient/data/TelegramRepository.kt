@@ -29,6 +29,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -66,6 +67,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val chatCache = ConcurrentHashMap<Long, JSONObject>()
     private val filePaths = ConcurrentHashMap<Int, String>()
     private val requestedDownloads = ConcurrentHashMap.newKeySet<Int>()
+    private val avatarRetryAttempts = ConcurrentHashMap<Int, Int>()
     private val pendingGallerySaves = ConcurrentHashMap<Int, GallerySaveRequest>()
     private val savedGalleryFiles = ConcurrentHashMap.newKeySet<Int>()
     private val requestedUsers = ConcurrentHashMap.newKeySet<Long>()
@@ -761,28 +763,47 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private fun publishFile(file: JSONObject) {
         val local = file.optJSONObject("local") ?: return
         val id = file.optInt("id")
+        if (id <= 0) return
         val path = local.optString("path").takeIf { it.isNotBlank() }
         val isCompleted = local.optBoolean("is_downloading_completed")
-        if (path != null) filePaths[id] = path
-        _transfers.value = _transfers.value + (id to TransferState(id, local.optLong("downloaded_size"), file.optLong("size"), isCompleted))
+        val isActive = local.optBoolean("is_downloading_active")
+        val readyPath = path?.let(::readyLocalPath)
+        if (readyPath != null && isCompleted) {
+            filePaths[id] = readyPath
+        } else if (isCompleted) {
+            // Never publish a path that still points at a partial or deleted file.
+            filePaths.remove(id)
+        }
+        val downloadedBytes = local.optLong("downloaded_size")
+        val totalBytes = file.optLong("size")
+        _transfers.value = _transfers.value + (id to TransferState(id, downloadedBytes, totalBytes, isCompleted && readyPath != null))
+        // A failed/cancelled request must release the de-duplication guard. Otherwise a
+        // later user/chat update can never request this avatar again.
+        if (isCompleted || !isActive) requestedDownloads.remove(id)
+        if (isCompleted && readyPath != null) {
+            avatarRetryAttempts.remove(id)
+        } else if (!isCompleted && !isActive && isAvatarFile(id)) {
+            scheduleAvatarRetry(id)
+        }
         // File updates can arrive many times per second. Progress is kept in the transfer
         // state, while chat/message paths are published only when the file is complete.
-        if (isCompleted && path != null) {
+        if (isCompleted && readyPath != null) {
+            val revision = fileRevision(readyPath)
             publishChats()
-            _currentUser.value?.takeIf { it.avatarFileId == id }?.let { _currentUser.value = it.copy(avatarPath = path) }
-            _users.value = _users.value.mapValues { (_, user) -> if (user.avatarFileId == id) user.copy(avatarPath = path) else user }
+            _currentUser.value?.takeIf { it.avatarFileId == id }?.let { _currentUser.value = it.copy(avatarPath = readyPath, avatarRevision = revision) }
+            _users.value = _users.value.mapValues { (_, user) -> if (user.avatarFileId == id) user.copy(avatarPath = readyPath, avatarRevision = revision) else user }
             _messages.value = _messages.value.mapValues { (_, messages) ->
                 messages.map { message ->
-                    if (message.mediaFileId == id) message.copy(mediaPath = path) else message
+                    if (message.mediaFileId == id) message.copy(mediaPath = readyPath) else message
                 }
             }
         }
-        if (_settings.value.retainDeletedMessages && isCompleted && path != null) {
-            repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.updateMediaPath(id, path) }
+        if (_settings.value.retainDeletedMessages && isCompleted && readyPath != null) {
+            repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.updateMediaPath(id, readyPath) }
         }
-        if (isCompleted && path != null) {
+        if (isCompleted && readyPath != null) {
             pendingGallerySaves.remove(id)?.let { request ->
-                repositoryScope.launch(Dispatchers.IO) { saveLocalFileToMediaStore(id, path, request) }
+                repositoryScope.launch(Dispatchers.IO) { saveLocalFileToMediaStore(id, readyPath, request) }
             }
             if (_settings.value.saveToGallery) {
                 _messages.value.values.flatten()
@@ -842,34 +863,39 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val phone = user.optString("phone_number").ifBlank { null }
         val avatarFileId = user.optJSONObject("profile_photo")?.optJSONObject("small")?.optInt("id")?.takeIf { it > 0 }
         avatarFileId?.let { requestFile(it, respectAutoDownload = false) }
+        val avatarPath = avatarFileId?.let { filePaths[it]?.let(::readyLocalPath) }
         return TelegramUser(
             id = user.optLong("id"),
             displayName = displayName.ifBlank { username ?: "User" },
             username = username,
             phoneNumber = phone,
             avatarFileId = avatarFileId,
-            avatarPath = avatarFileId?.let(filePaths::get),
+            avatarPath = avatarPath,
+            avatarRevision = avatarPath?.let(::fileRevision) ?: 0L,
             firstName = firstName,
             lastName = lastName,
         )
     }
 
-    private fun mapChat(chat: JSONObject) = ChatSummary(
-        id = chat.optLong("id"),
-        title = chat.optString("title", "Chat"),
-        subtitle = chat.optJSONObject("last_message")?.let(::messagePreview).orEmpty(),
-        unreadCount = chat.optInt("unread_count"),
-        isMarkedAsUnread = chat.optBoolean("is_marked_as_unread"),
-        isPinned = localPinOverrides[chat.optLong("id")] ?: (chat.optJSONArray("positions")?.let { positions -> (0 until positions.length()).any { positions.optJSONObject(it)?.optBoolean("is_pinned") == true } } == true),
-        isChannel = chat.isChannelChat(),
-        isGroup = chat.isGroupChat(),
-        isPrivate = chat.isPrivateChat(),
-        lastMessage = chat.optJSONObject("last_message")?.let { mapMessage(it, chat.optLong("id"), chat.isChannelChat()) },
-        photoPath = chat.optJSONObject("photo")?.optJSONObject("small")?.optInt("id")?.takeIf { it > 0 }?.let { fileId ->
-            requestFile(fileId, respectAutoDownload = false)
-            filePaths[fileId]
-        },
-    )
+    private fun mapChat(chat: JSONObject): ChatSummary {
+        val photoFileId = chat.optJSONObject("photo")?.optJSONObject("small")?.optInt("id")?.takeIf { it > 0 }
+        photoFileId?.let { requestFile(it, respectAutoDownload = false) }
+        val photoPath = photoFileId?.let { filePaths[it]?.let(::readyLocalPath) }
+        return ChatSummary(
+            id = chat.optLong("id"),
+            title = chat.optString("title", "Chat"),
+            subtitle = chat.optJSONObject("last_message")?.let(::messagePreview).orEmpty(),
+            unreadCount = chat.optInt("unread_count"),
+            isMarkedAsUnread = chat.optBoolean("is_marked_as_unread"),
+            isPinned = localPinOverrides[chat.optLong("id")] ?: (chat.optJSONArray("positions")?.let { positions -> (0 until positions.length()).any { positions.optJSONObject(it)?.optBoolean("is_pinned") == true } } == true),
+            isChannel = chat.isChannelChat(),
+            isGroup = chat.isGroupChat(),
+            isPrivate = chat.isPrivateChat(),
+            lastMessage = chat.optJSONObject("last_message")?.let { mapMessage(it, chat.optLong("id"), chat.isChannelChat()) },
+            photoPath = photoPath,
+            photoRevision = photoPath?.let(::fileRevision) ?: 0L,
+        )
+    }
 
     private fun mapMessage(message: JSONObject, parentChatId: Long? = null, channelPost: Boolean = false): MessageSummary? {
         val content = message.optJSONObject("content") ?: return null
@@ -1007,12 +1033,50 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     private fun requestFile(fileId: Int, priority: Int = 4, respectAutoDownload: Boolean = true) {
-        if (fileId <= 0 || !requestedDownloads.add(fileId)) return
+        if (fileId <= 0) return
+        val cachedPath = filePaths[fileId]
+        if (cachedPath != null && readyLocalPath(cachedPath) != null) return
+        if (cachedPath != null) filePaths.remove(fileId, cachedPath)
+        if (!requestedDownloads.add(fileId)) return
         if (respectAutoDownload && !_settings.value.autoDownloadMedia) {
             requestedDownloads.remove(fileId)
             return
         }
-        client?.send("downloadFile", JSONObject().put("file_id", fileId).put("priority", priority).put("offset", 0).put("limit", 0).put("synchronous", false))
+        if (client == null) {
+            requestedDownloads.remove(fileId)
+            return
+        }
+        client.send("downloadFile", JSONObject().put("file_id", fileId).put("priority", priority).put("offset", 0).put("limit", 0).put("synchronous", false))
+        // TDLib normally emits updateFile, but also release the guard if the client is
+        // disconnected before that update can arrive. A later map/update can retry safely.
+        repositoryScope.launch {
+            delay(FILE_REQUEST_GUARD_MS)
+            requestedDownloads.remove(fileId)
+        }
+    }
+
+    private fun isAvatarFile(fileId: Int): Boolean =
+        _currentUser.value?.avatarFileId == fileId ||
+            _users.value.values.any { it.avatarFileId == fileId } ||
+            chatCache.values.any { chat ->
+                chat.optJSONObject("photo")?.optJSONObject("small")?.optInt("id") == fileId
+            }
+
+    private fun scheduleAvatarRetry(fileId: Int) {
+        val attempt = (avatarRetryAttempts.merge(fileId, 1, Int::plus) ?: 1)
+        if (attempt > MAX_AVATAR_RETRIES) return
+        repositoryScope.launch {
+            delay(AVATAR_RETRY_DELAY_MS * attempt)
+            requestFile(fileId, priority = 8, respectAutoDownload = false)
+        }
+    }
+
+    private fun readyLocalPath(path: String): String? =
+        File(path).takeIf { it.isFile && it.length() > 0L }?.absolutePath
+
+    private fun fileRevision(path: String): Long {
+        val file = File(path)
+        return (file.lastModified() * 31L) xor file.length() xor path.hashCode().toLong()
     }
 
     private fun maybeAutoSaveMedia(message: MessageSummary) {
@@ -1233,6 +1297,9 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         const val FOLDER_NAME_PREFIX = "folder_name."
         const val FOLDER_CHATS_PREFIX = "folder_chats."
         const val AUTH_ACTION_TIMEOUT_MS = 15_000L
+        const val FILE_REQUEST_GUARD_MS = 15_000L
+        const val AVATAR_RETRY_DELAY_MS = 600L
+        const val MAX_AVATAR_RETRIES = 3
         const val MAX_HISTORY_PAGES = 8
         const val ACTIVITY_WINDOW_SECONDS = 24 * 60 * 60L
         const val MAX_ACTIVITY_PAGES = 200

@@ -188,7 +188,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Avatar(title, size = 38.dp, photoPath = chat?.photoPath)
+                        Avatar(title, size = 38.dp, photoPath = chat?.photoPath, photoRevision = chat?.photoRevision ?: 0L)
                         Spacer(Modifier.size(10.dp))
                         Column {
                             Text(title, maxLines = 1, fontWeight = FontWeight.SemiBold)
@@ -379,6 +379,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                                 mergeWithNext = false,
                                 showSenderAvatar = chat?.isGroup == true,
                                 senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
+                                senderAvatarRevision = message.senderUserId?.let { users[it]?.avatarRevision } ?: 0L,
                                 onDownloadFile = viewModel::downloadFile,
                                 onLongClick = { selectedMessage = it },
                             )
@@ -465,6 +466,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                                     title = user?.displayName ?: speaker.displayName,
                                     size = 36.dp,
                                     photoPath = user?.avatarPath,
+                                    photoRevision = user?.avatarRevision ?: 0L,
                                 )
                                 Spacer(Modifier.size(8.dp))
                                 Column(Modifier.weight(1f)) {
@@ -705,6 +707,7 @@ private fun MessageBubble(
     mergeWithNext: Boolean,
     showSenderAvatar: Boolean,
     senderAvatarPath: String?,
+    senderAvatarRevision: Long,
     onDownloadFile: (Int) -> Unit,
     onLongClick: (MessageSummary) -> Unit,
 ) {
@@ -731,7 +734,7 @@ private fun MessageBubble(
         verticalAlignment = Alignment.Bottom,
     ) {
         if (!outgoing && showSenderAvatar) {
-            Avatar(message.senderName, size = 32.dp, photoPath = senderAvatarPath)
+            Avatar(message.senderName, size = 32.dp, photoPath = senderAvatarPath, photoRevision = senderAvatarRevision)
             Spacer(Modifier.size(6.dp))
         }
         Column(

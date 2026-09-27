@@ -107,7 +107,7 @@ fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, on
                 modifier = Modifier.shadow(1.dp),
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Avatar(title = accountName, size = 38.dp, photoPath = currentUser?.avatarPath)
+                        Avatar(title = accountName, size = 38.dp, photoPath = currentUser?.avatarPath, photoRevision = currentUser?.avatarRevision ?: 0L)
                         Spacer(Modifier.width(10.dp))
                         Column {
                             Text(accountName, maxLines = 1, fontWeight = FontWeight.SemiBold)
@@ -218,7 +218,7 @@ private fun ChatRow(chat: ChatSummary, labels: List<ChatFolder>, onChatClick: (L
     var menuExpanded by remember { mutableStateOf(false) }
     Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth().clickable { onChatClick(chat.id) }) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-            Avatar(chat.title, photoPath = chat.photoPath)
+            Avatar(chat.title, photoPath = chat.photoPath, photoRevision = chat.photoRevision)
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -389,12 +389,12 @@ private fun ChatFolderPickerDialog(
 }
 
 @Composable
-fun Avatar(title: String, size: Dp = 54.dp, photoPath: String? = null) {
+fun Avatar(title: String, size: Dp = 54.dp, photoPath: String? = null, photoRevision: Long = 0L) {
     val colors = listOf(Color(0xFF4F9BD5), Color(0xFF63B98D), Color(0xFFE5A84B), Color(0xFFB47BD5), Color(0xFFE27D73))
     val color = colors[title.hashCode().ushr(1) % colors.size]
     val initials = title.trim().split(" ").filter { it.isNotBlank() }.take(2).joinToString("") { it.first().uppercase() }.ifBlank { "C" }
     Box(Modifier.size(size).clip(CircleShape).background(color), contentAlignment = Alignment.Center) {
-        val bitmap = rememberDecodedBitmap(photoPath, maxDimension = 256)
+        val bitmap = rememberDecodedBitmap(photoPath, maxDimension = 256, revision = photoRevision)
         if (bitmap != null) {
             androidx.compose.foundation.Image(
                 bitmap = bitmap.asImageBitmap(),
@@ -409,14 +409,27 @@ fun Avatar(title: String, size: Dp = 54.dp, photoPath: String? = null) {
 }
 
 @Composable
-fun rememberDecodedBitmap(path: String?, maxDimension: Int): android.graphics.Bitmap? {
-    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, key1 = path, key2 = maxDimension) {
-        value = withContext(Dispatchers.IO) { path?.let { decodeSampledBitmap(it, maxDimension) } }
+fun rememberDecodedBitmap(path: String?, maxDimension: Int, revision: Long = 0L): android.graphics.Bitmap? {
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, path, maxDimension, revision) {
+        value = withContext(Dispatchers.IO) {
+            // TDLib can publish the path just before the filesystem finishes moving the
+            // file into place. Retry briefly so a transient decode failure never leaves a
+            // permanent initials placeholder until the next chat refresh.
+            repeat(8) { attempt ->
+                path?.let { decodeSampledBitmap(it, maxDimension) }?.let { decoded ->
+                    return@withContext decoded
+                }
+                if (attempt < 7) kotlinx.coroutines.delay(150L * (attempt + 1))
+            }
+            null
+        }
     }
     return bitmap
 }
 
 private fun decodeSampledBitmap(path: String, maxDimension: Int): android.graphics.Bitmap? {
+    val file = java.io.File(path)
+    if (!file.isFile || file.length() <= 0L) return null
     val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
     android.graphics.BitmapFactory.decodeFile(path, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null

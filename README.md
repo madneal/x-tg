@@ -43,8 +43,10 @@ tracks additional Telegram capabilities as they are implemented.
 Multiple Telegram accounts are supported. Use **Settings → Accounts → Add
 account** to start a second phone-number login, then switch accounts from the
 same list. Each account uses an isolated TDLib database, files directory, and
-Android Keystore-wrapped database key, so switching accounts does not mix chat
-history or credentials.
+Android Keystore-wrapped database key. The encrypted key is durably mirrored in
+the account's no-backup TDLib directory, so a quick process restart or APK
+update does not turn an existing account into a new login. Switching accounts
+does not mix chat history or credentials.
 
 TDLib and its generated API are licensed independently of this application.
 Review all third-party notices before distributing an APK.

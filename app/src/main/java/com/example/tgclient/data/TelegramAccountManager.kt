@@ -30,6 +30,8 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
     val activeAccountId: StateFlow<String> = _activeAccountId.asStateFlow()
 
     init {
+        // Ensure the first account is durable before TDLib starts its database.
+        persistAccountIds()
         repository(_activeAccountId.value)
     }
 
@@ -49,7 +51,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
         if (accountId !in accountIds) return
         repository(accountId)
         _activeAccountId.value = accountId
-        preferences.edit().putString(ACTIVE_ACCOUNT, accountId).apply()
+        preferences.edit().putString(ACTIVE_ACCOUNT, accountId).commit()
     }
 
     @Synchronized
@@ -71,7 +73,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
         val repository = repositories.remove(accountId)
         accountIds.remove(accountId)
         accountLabels.remove(accountId)
-        preferences.edit().remove("label.$accountId").apply()
+        preferences.edit().remove("label.$accountId").commit()
         persistAccountIds()
         _accounts.value = accountIds.mapIndexed(::accountSummary)
 
@@ -79,7 +81,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
             val replacement = accountIds.first()
             repository(replacement)
             _activeAccountId.value = replacement
-            preferences.edit().putString(ACTIVE_ACCOUNT, replacement).apply()
+            preferences.edit().putString(ACTIVE_ACCOUNT, replacement).commit()
         }
 
         scope.launch(Dispatchers.IO) {
@@ -109,7 +111,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
             ?: return
         if (accountLabels[accountId] == label) return
         accountLabels[accountId] = label
-        preferences.edit().putString("label.$accountId", label).apply()
+        preferences.edit().putString("label.$accountId", label).commit()
         _accounts.value = accountIds.mapIndexed(::accountSummary)
     }
 
@@ -122,7 +124,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
         ?: listOf(DEFAULT_ACCOUNT_ID)
 
     private fun persistAccountIds() {
-        preferences.edit().putString(ACCOUNT_IDS, accountIds.joinToString(",")).apply()
+        preferences.edit().putString(ACCOUNT_IDS, accountIds.joinToString(",")).commit()
     }
 
     private companion object {

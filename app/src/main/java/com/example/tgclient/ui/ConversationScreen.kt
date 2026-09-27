@@ -1,6 +1,8 @@
 package com.example.tgclient.ui
 
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -24,6 +26,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -86,6 +89,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -108,7 +112,7 @@ import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () -> Unit) {
+fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () -> Unit, onOpenChat: (Long) -> Unit = {}) {
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val chats by viewModel.chats.collectAsStateWithLifecycle()
     val users by viewModel.users.collectAsStateWithLifecycle()
@@ -380,6 +384,18 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                                 showSenderAvatar = chat?.isGroup == true,
                                 senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
                                 senderAvatarRevision = message.senderUserId?.let { users[it]?.avatarRevision } ?: 0L,
+                                onOpenLink = { target ->
+                                    val chatTarget = telegramChatTarget(target)
+                                    if (chatTarget != null) {
+                                        viewModel.resolveChatTarget(
+                                            chatTarget,
+                                            onResolved = onOpenChat,
+                                            onFailed = { openExternalLink(context, target) },
+                                        )
+                                    } else {
+                                        openExternalLink(context, target)
+                                    }
+                                },
                                 onDownloadFile = viewModel::downloadFile,
                                 onLongClick = { selectedMessage = it },
                             )
@@ -708,6 +724,7 @@ private fun MessageBubble(
     showSenderAvatar: Boolean,
     senderAvatarPath: String?,
     senderAvatarRevision: Long,
+    onOpenLink: (String) -> Unit,
     onDownloadFile: (Int) -> Unit,
     onLongClick: (MessageSummary) -> Unit,
 ) {
@@ -779,7 +796,16 @@ private fun MessageBubble(
                 null -> null
             }
             if (message.text.isNotBlank() && message.text != mediaPlaceholder) {
-                Text(messageAnnotatedString(message), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
+                val annotated = messageAnnotatedString(message)
+                ClickableText(
+                    text = annotated,
+                    style = LocalTextStyle.current.copy(color = MaterialTheme.colorScheme.onSurface),
+                    onClick = { offset ->
+                        annotated.getStringAnnotations("chatwave_link", offset, offset)
+                            .firstOrNull()
+                            ?.let { onOpenLink(it.item) }
+                    },
+                )
             }
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.align(if (outgoing) Alignment.End else Alignment.Start)) {
                 Text(formatMessageTime(message.dateEpochSeconds), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -906,13 +932,92 @@ private fun MessageSummary.toTextFieldValue(): TextFieldValue {
 private fun messageAnnotatedString(message: MessageSummary): AnnotatedString {
     val builder = AnnotatedString.Builder()
     builder.append(message.text)
+    val occupiedLinks = mutableListOf<IntRange>()
     message.entities.forEach { entity ->
         val start = entity.offset.coerceIn(0, message.text.length)
         val end = (entity.offset + entity.length).coerceIn(start, message.text.length)
         if (start >= end) return@forEach
         entity.style()?.let { builder.addStyle(it, start, end) }
+        entity.linkTarget(message.text.substring(start, end))?.let { target ->
+            builder.addStringAnnotation("chatwave_link", target, start, end)
+            occupiedLinks += start until end
+        }
+    }
+    detectMessageLinks(message.text).forEach { link ->
+        if (occupiedLinks.none { it overlaps (link.start until link.end) }) {
+            builder.addStyle(linkStyle(), link.start, link.end)
+            builder.addStringAnnotation("chatwave_link", link.target, link.start, link.end)
+        }
     }
     return builder.toAnnotatedString()
+}
+
+private data class MessageLink(val start: Int, val end: Int, val target: String)
+
+private fun detectMessageLinks(text: String): List<MessageLink> {
+    val links = mutableListOf<MessageLink>()
+    val patterns = listOf(
+        Regex("(?i)(?<![\\w@])((?:https?://|www\\.|t\\.me/|telegram\\.me/)[^\\s<>()]+)"),
+        Regex("(?<![\\w@])@([A-Za-z][A-Za-z0-9_]{4,31})"),
+        Regex("(?<![\\w-])-100\\d{5,20}(?!\\w)"),
+    )
+    patterns.forEach { pattern ->
+        pattern.findAll(text).forEach { match ->
+            val raw = match.value
+            val cleaned = raw.trimEnd('.', ',', '!', '?', ';', ':', ')', ']', '}')
+            if (cleaned.isBlank()) return@forEach
+            val start = match.range.first
+            links += MessageLink(start, start + cleaned.length, normalizeLinkTarget(cleaned))
+        }
+    }
+    return links.sortedBy { it.start }
+}
+
+private fun MessageEntity.linkTarget(displayText: String): String? = when (type) {
+    "textEntityTypeTextUrl" -> argument?.takeIf { it.isNotBlank() }?.let(::normalizeLinkTarget)
+    "textEntityTypeUrl" -> normalizeLinkTarget(displayText)
+    "textEntityTypeMention" -> normalizeLinkTarget(displayText)
+    "textEntityTypeEmailAddress" -> "mailto:${displayText.trim()}"
+    "textEntityTypePhoneNumber" -> "tel:${displayText.trim()}"
+    else -> null
+}
+
+private fun normalizeLinkTarget(raw: String): String {
+    val value = raw.trim()
+    return when {
+        value.startsWith("http://", ignoreCase = true) || value.startsWith("https://", ignoreCase = true) ||
+            value.startsWith("tg://", ignoreCase = true) || value.startsWith("mailto:", ignoreCase = true) ||
+            value.startsWith("tel:", ignoreCase = true) -> value
+        value.startsWith("www.", ignoreCase = true) -> "https://$value"
+        value.startsWith("t.me/", ignoreCase = true) || value.startsWith("telegram.me/", ignoreCase = true) -> "https://$value"
+        value.startsWith("@") -> "https://t.me/${value.removePrefix("@")}"
+        value.matches(Regex("-100\\d{5,20}")) -> "tg://openmessage?chat_id=$value"
+        else -> value
+    }
+}
+
+private fun linkStyle() = SpanStyle(textDecoration = TextDecoration.Underline, color = Color(0xFF2A8BE7))
+
+private fun telegramChatTarget(raw: String): String? {
+    val value = raw.trim()
+    if (value.matches(Regex("-100\\d{5,20}"))) return value
+    if (value.startsWith("https://t.me/", ignoreCase = true) || value.startsWith("http://t.me/", ignoreCase = true) ||
+        value.startsWith("https://telegram.me/", ignoreCase = true) || value.startsWith("http://telegram.me/", ignoreCase = true)
+    ) {
+        return value.substringAfter("//").substringAfter('/').substringBefore('/').substringBefore('?').takeIf { it.matches(Regex("[A-Za-z][A-Za-z0-9_]{4,31}")) }
+    }
+    if (value.startsWith("tg://resolve?", ignoreCase = true)) {
+        return Uri.parse(value).getQueryParameter("domain")?.takeIf { it.matches(Regex("[A-Za-z][A-Za-z0-9_]{4,31}")) }
+    }
+    if (value.startsWith("tg://openmessage?", ignoreCase = true)) {
+        return Uri.parse(value).getQueryParameter("chat_id")?.takeIf { it.matches(Regex("-100\\d{5,20}")) }
+    }
+    return null
+}
+
+private fun openExternalLink(context: Context, target: String) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(target)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }
 }
 
 private fun MessageEntity.style(): SpanStyle? = when (type) {
@@ -921,9 +1026,11 @@ private fun MessageEntity.style(): SpanStyle? = when (type) {
     "textEntityTypeUnderline" -> SpanStyle(textDecoration = TextDecoration.Underline)
     "textEntityTypeStrikethrough" -> SpanStyle(textDecoration = TextDecoration.LineThrough)
     "textEntityTypeCode", "textEntityTypePre", "textEntityTypePreCode" -> SpanStyle(fontFamily = FontFamily.Monospace)
-    "textEntityTypeTextUrl", "textEntityTypeUrl", "textEntityTypeEmailAddress" -> SpanStyle(textDecoration = TextDecoration.Underline, color = Color(0xFF2A8BE7))
+    "textEntityTypeTextUrl", "textEntityTypeUrl", "textEntityTypeMention", "textEntityTypeEmailAddress", "textEntityTypePhoneNumber" -> linkStyle()
     else -> null
 }
+
+private infix fun IntRange.overlaps(other: IntRange): Boolean = first <= other.last && other.first <= last
 
 private fun MessageEntity.annotationValue(): String =
     if (type == "textEntityTypeTextUrl" && !argument.isNullOrBlank()) "$type|$argument" else type

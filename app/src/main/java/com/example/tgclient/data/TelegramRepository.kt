@@ -196,6 +196,23 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         }
     }
 
+    /** Resolves a public username or a Telegram numeric chat id for an in-app jump. */
+    suspend fun resolveChatTarget(target: String): Long? {
+        val cleanTarget = target.trim().removePrefix("@").takeIf { it.isNotBlank() } ?: return null
+        val numericId = cleanTarget.toLongOrNull()
+        val chat = runCatching {
+            if (numericId != null) {
+                client?.request("getChat", JSONObject().put("chat_id", numericId))
+            } else {
+                client?.request("searchPublicChat", JSONObject().put("username", cleanTarget))
+            }
+        }.getOrNull() ?: return null
+        val chatId = chat.optLong("id").takeIf { it != 0L } ?: return null
+        chatCache[chatId] = chat
+        publishChats()
+        return chatId
+    }
+
     /** Removes this TDLib session from the device without deleting the Telegram account. */
     suspend fun removeFromDevice() {
         runCatching { client?.request("logOut") }

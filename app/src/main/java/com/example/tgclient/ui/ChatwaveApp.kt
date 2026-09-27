@@ -28,7 +28,12 @@ fun ChatwaveApp(accountManager: TelegramAccountManager, updateManager: AppUpdate
         Surface(modifier = androidx.compose.ui.Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             when {
                 authState !is AuthState.Ready -> AuthScreen(authState, viewModel, accountManager, activeAccountId)
-                selectedChatId != null -> ConversationScreen(selectedChatId!!, viewModel) { selectedChatId = null }
+                selectedChatId != null -> ConversationScreen(
+                    chatId = selectedChatId!!,
+                    viewModel = viewModel,
+                    onBack = { selectedChatId = null },
+                    onOpenChat = { selectedChatId = it },
+                )
                 showSettings -> SettingsScreen(viewModel, accountManager, updateManager, activeAccountId, onBack = { showSettings = false }, onAccountChanged = { showSettings = false })
                 else -> ChatListScreen(viewModel, onSettingsClick = { showSettings = true }) { selectedChatId = it }
             }

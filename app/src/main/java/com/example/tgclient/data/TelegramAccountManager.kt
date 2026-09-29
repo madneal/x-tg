@@ -5,6 +5,7 @@ import com.example.tgclient.model.AccountSummary
 import com.example.tgclient.security.DatabaseKeyStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,6 +20,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
     private val appContext = context.applicationContext
     private val preferences = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
     private val repositories = linkedMapOf<String, TelegramRepository>()
+    private val accountObservers = mutableMapOf<String, Job>()
     private val accountIds = loadAccountIds().toMutableList()
     private val accountLabels = accountIds.associateWith { id -> preferences.getString("label.$id", null) }.toMutableMap()
     private val _accounts = MutableStateFlow(accountIds.mapIndexed(::accountSummary))
@@ -40,7 +42,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
         repositories[accountId]?.let { return it }
         val repository = TelegramRepository(appContext, scope, accountId)
         repositories[accountId] = repository
-        repository.currentUser.onEach { user ->
+        accountObservers[accountId] = repository.currentUser.onEach { user ->
             if (user != null) updateAccountLabel(accountId, user)
         }.launchIn(scope)
         return repository
@@ -49,6 +51,11 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
     @Synchronized
     fun switchAccount(accountId: String) {
         if (accountId !in accountIds) return
+        val previousAccountId = _activeAccountId.value
+        if (previousAccountId != accountId) {
+            repositories.remove(previousAccountId)?.close()
+            accountObservers.remove(previousAccountId)?.cancel()
+        }
         repository(accountId)
         _activeAccountId.value = accountId
         preferences.edit().putString(ACTIVE_ACCOUNT, accountId).commit()
@@ -71,6 +78,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
         if (accountId !in accountIds || accountIds.size <= 1) return false
         val wasActive = _activeAccountId.value == accountId
         val repository = repositories.remove(accountId)
+        accountObservers.remove(accountId)?.cancel()
         accountIds.remove(accountId)
         accountLabels.remove(accountId)
         preferences.edit().remove("label.$accountId").commit()

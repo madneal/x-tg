@@ -23,6 +23,9 @@ import com.example.tgclient.security.MessageRetentionStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -42,7 +45,10 @@ import java.util.UUID
 
 class TelegramRepository(context: Context, scope: CoroutineScope, val accountId: String = DEFAULT_ACCOUNT_ID) {
     private val appContext = context.applicationContext
-    private val repositoryScope = scope
+    private val repositoryJob = SupervisorJob(scope.coroutineContext[Job])
+    private val repositoryScope = CoroutineScope(scope.coroutineContext + repositoryJob)
+    private val updateScope = CoroutineScope(repositoryJob + Dispatchers.Default.limitedParallelism(1))
+    private val retentionScope = CoroutineScope(repositoryJob + Dispatchers.IO)
     private val client: TdLibClient?
     private val notificationController = TelegramNotificationController(context)
     private val messageRetentionStore = MessageRetentionStore(context, accountId)
@@ -73,6 +79,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val requestedUsers = ConcurrentHashMap.newKeySet<Long>()
     private val localPinOverrides = ConcurrentHashMap<Long, Boolean>()
     private val historyCursors = ConcurrentHashMap<Long, HistoryCursor>()
+    private val retainedMessageWrites = Channel<MessageSummary>(Channel.UNLIMITED)
+    private lateinit var retentionWriterJob: Job
 
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
     val chats: StateFlow<List<ChatSummary>> = _chats.asStateFlow()
@@ -89,6 +97,25 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     val chatFolders: StateFlow<List<ChatFolder>> = _chatFolders.asStateFlow()
 
     init {
+        retentionWriterJob = retentionScope.launch {
+            for (firstMessage in retainedMessageWrites) {
+                val batch = mutableListOf(firstMessage)
+                delay(RETENTION_WRITE_BATCH_DELAY_MS)
+                while (true) {
+                    val next = retainedMessageWrites.tryReceive().getOrNull() ?: break
+                    batch += next
+                }
+                runCatching { messageRetentionStore.saveAll(batch) }
+            }
+        }
+        updateScope.launch {
+            delay(SESSION_RESTORE_TIMEOUT_MS)
+            if (_authState.value == AuthState.Loading) {
+                // A slow or unavailable connection must not look like a request to
+                // log in again. Keep the encrypted TDLib database and report recovery.
+                _authState.value = AuthState.Error("Telegram session is taking too long to restore. Check your connection and restart the app.")
+            }
+        }
         if (BuildConfig.TELEGRAM_API_ID == 0 || BuildConfig.TELEGRAM_API_HASH.isBlank()) {
             client = null
             _authState.value = AuthState.MissingConfiguration
@@ -96,7 +123,10 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             client = runCatching { TdLibClient(context, DatabaseKeyStore(context, accountId), accountId) }
                 .onFailure { _authState.value = AuthState.Error("TDLib could not start") }
                 .getOrNull()
-            client?.updates?.onEach(::handleUpdate)?.launchIn(scope)
+            // TDLib can burst hundreds of updates after a reconnect. Mapping chats,
+            // messages and files on Main made the UI freeze and let the update queue
+            // grow faster than it could drain.
+            client?.updates?.onEach(::handleUpdate)?.launchIn(updateScope)
             client?.start()
         }
     }
@@ -216,11 +246,13 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     /** Removes this TDLib session from the device without deleting the Telegram account. */
     suspend fun removeFromDevice() {
         runCatching { client?.request("logOut") }
-        client?.close()
+        close()
     }
 
     fun close() {
         client?.close()
+        retainedMessageWrites.close()
+        retentionWriterJob.invokeOnCompletion { repositoryJob.cancel() }
     }
 
     fun logout() {
@@ -723,7 +755,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val chatId = message.optLong("chat_id").takeIf { it != 0L } ?: return
         val isChannel = chatCache[chatId]?.isChannelChat() == true
         val mapped = mapMessage(message, chatId, isChannel) ?: return
-        if (_settings.value.retainDeletedMessages) repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.save(mapped) }
+        if (_settings.value.retainDeletedMessages) retainedMessageWrites.trySend(mapped)
         maybeAutoSaveMedia(mapped)
         val current = _messages.value[chatId].orEmpty()
         _messages.value = _messages.value + (chatId to mergeMessages(current, listOf(mapped)))
@@ -751,7 +783,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             mediaName = media?.name,
             entities = entities,
         ) ?: return
-        if (_settings.value.retainDeletedMessages) repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.save(replacement) }
+        if (_settings.value.retainDeletedMessages) retainedMessageWrites.trySend(replacement)
         maybeAutoSaveMedia(replacement)
         _messages.value = _messages.value + (chatId to current.map { if (it.id == messageId) replacement else it })
     }
@@ -1314,6 +1346,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         const val FOLDER_NAME_PREFIX = "folder_name."
         const val FOLDER_CHATS_PREFIX = "folder_chats."
         const val AUTH_ACTION_TIMEOUT_MS = 15_000L
+        const val SESSION_RESTORE_TIMEOUT_MS = 60_000L
+        const val RETENTION_WRITE_BATCH_DELAY_MS = 180L
         const val FILE_REQUEST_GUARD_MS = 15_000L
         const val AVATAR_RETRY_DELAY_MS = 600L
         const val MAX_AVATAR_RETRIES = 3

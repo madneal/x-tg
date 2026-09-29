@@ -246,15 +246,11 @@ fun AuthScreen(state: AuthState, viewModel: ChatwaveViewModel, accountManager: T
                             ) { viewModel.submitEmailCode(input.trim()) }
                             is AuthState.Error -> {
                                 Text(state.message, color = MaterialTheme.colorScheme.error)
-                                AuthField(
-                                    "Phone number",
-                                    "+1 555 123 4567",
-                                    input,
-                                    KeyboardType.Phone,
-                                    "Try again",
-                                    { input = it },
-                                    loading = authAction == AuthAction.SubmitPhone,
-                                ) { viewModel.submitPhone(input.trim()) }
+                                Text(
+                                    "Your saved Telegram session has not been removed. Restart the app to try restoring it again.",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 8.dp),
+                                )
                             }
                             AuthState.Ready -> Unit
                         }

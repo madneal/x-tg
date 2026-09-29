@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.drinkless.tdlib.PlatformTdClientEngine
 import org.drinkless.tdlib.TdKtxClient
 import org.drinkless.tdlib.TdLibInitializer
@@ -94,22 +95,24 @@ class TdLibClient(
     }
 
     suspend fun request(type: String, fields: JSONObject = JSONObject()): JSONObject = withContext(Dispatchers.IO) {
-        suspendCancellableCoroutine { continuation ->
-            val request = JSONObject(fields.toString()).put("@type", type).put("@extra", UUID.randomUUID().toString())
-            scope.launch {
-                runCatching { client.sendJson(request.toString()) }
-                    .onSuccess { raw ->
-                        if (!continuation.isActive) return@onSuccess
-                        runCatching { JSONObject(raw) }
-                            .onSuccess { result ->
-                                if (result.optString("@type") == "error") continuation.resumeWithException(TelegramException(result.optInt("code"), result.optString("message", "Telegram request failed")))
-                                else continuation.resume(result)
-                            }
-                            .onFailure(continuation::resumeWithException)
-                    }
-                    .onFailure(continuation::resumeWithException)
+        withTimeout(REQUEST_TIMEOUT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                val request = JSONObject(fields.toString()).put("@type", type).put("@extra", UUID.randomUUID().toString())
+                scope.launch {
+                    runCatching { client.sendJson(request.toString()) }
+                        .onSuccess { raw ->
+                            if (!continuation.isActive) return@onSuccess
+                            runCatching { JSONObject(raw) }
+                                .onSuccess { result ->
+                                    if (result.optString("@type") == "error") continuation.resumeWithException(TelegramException(result.optInt("code"), result.optString("message", "Telegram request failed")))
+                                    else continuation.resume(result)
+                                }
+                                .onFailure(continuation::resumeWithException)
+                        }
+                        .onFailure(continuation::resumeWithException)
+                }
+                continuation.invokeOnCancellation { /* TDLib safely ignores a late response. */ }
             }
-            continuation.invokeOnCancellation { /* TDLib safely ignores a late response. */ }
         }
     }
 
@@ -131,6 +134,7 @@ class TdLibClient(
 
     private companion object {
         const val DEFAULT_ACCOUNT_ID = "default"
+        const val REQUEST_TIMEOUT_MS = 45_000L
     }
 }
 

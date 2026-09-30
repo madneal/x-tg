@@ -76,6 +76,7 @@ fun SettingsScreen(
     activeAccountId: String,
     onBack: () -> Unit,
     onAccountChanged: () -> Unit,
+    onOpenSystemNotificationSettings: () -> Unit,
 ) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val accounts by accountManager.accounts.collectAsStateWithLifecycle()
@@ -136,8 +137,9 @@ fun SettingsScreen(
                         accountManager.createAccount()
                         onAccountChanged()
                     },
+                    enabled = accountManager.canAddAccount(),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                ) { Text("Add account") }
+                ) { Text(if (accountManager.canAddAccount()) "Add account" else "Maximum accounts reached") }
             }
 
             SettingsSection("Account") {
@@ -184,6 +186,12 @@ fun SettingsScreen(
 
             SettingsSection("Notifications") {
                 SettingToggle(Icons.Default.Notifications, "Notifications", "Show notifications for new messages", settings.notificationsEnabled, viewModel::updateNotifications)
+                SettingInfo(
+                    Icons.Default.Notifications,
+                    "Android notification permission",
+                    "Review notification permission and channel settings for Chatwave",
+                    modifier = Modifier.clickable(onClick = onOpenSystemNotificationSettings),
+                )
                 SettingToggle(Icons.Default.Info, "Message preview", "Show message text in notifications", settings.showMessagePreview, viewModel::updateMessagePreview)
                 SettingToggle(Icons.Default.VolumeUp, "In-app sounds", "Play a sound for incoming messages", settings.inAppSounds, viewModel::updateInAppSounds)
                 SettingToggle(Icons.Default.Vibration, "Vibration", "Vibrate for incoming messages", settings.vibration, viewModel::updateVibration)

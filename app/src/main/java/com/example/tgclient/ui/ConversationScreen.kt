@@ -2,6 +2,7 @@ package com.example.tgclient.ui
 
 import android.content.Context
 import android.content.Intent
+import android.widget.Toast
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -56,6 +57,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -90,6 +92,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -98,7 +101,9 @@ import androidx.core.content.FileProvider
 import com.example.tgclient.model.MediaType
 import com.example.tgclient.model.MessageEntity
 import com.example.tgclient.model.MessageSummary
+import com.example.tgclient.model.TransferState
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import java.io.File
 import java.time.Instant
@@ -114,10 +119,12 @@ import java.util.Locale
 @Composable
 fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () -> Unit, onOpenChat: (Long) -> Unit = {}) {
     val messages by viewModel.messages.collectAsStateWithLifecycle()
+    val chatHistory by viewModel.chatHistory.collectAsStateWithLifecycle()
     val chats by viewModel.chats.collectAsStateWithLifecycle()
     val users by viewModel.users.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val groupActivity by viewModel.groupActivity.collectAsStateWithLifecycle()
+    val transfers by viewModel.transfers.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var draft by remember { mutableStateOf(TextFieldValue()) }
     var showChatMenu by remember { mutableStateOf(false) }
@@ -136,6 +143,13 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     val scrollScope = rememberCoroutineScope()
     var positionedAtLatest by remember(chatId) { mutableStateOf(false) }
     val chatMessages = messages[chatId].orEmpty()
+    val historyState = chatHistory[chatId]
+    val historyError = historyState?.initialLoadError ?: historyState?.olderLoadError
+    val retryHistoryLoad: () -> Unit = if (historyState?.initialLoadError != null) {
+        { viewModel.openChat(chatId); Unit }
+    } else {
+        { viewModel.loadOlderMessages(chatId); Unit }
+    }
     val showJumpToLatest by remember(chatMessages.size) {
         derivedStateOf {
             val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
@@ -161,6 +175,8 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
             // An attachment is composed before it is sent. Editing and attaching at the same
             // time is ambiguous, so switch back to the normal send composer.
             editingTarget = null
+        } else {
+            Toast.makeText(context, "Could not open that file. Please choose it again.", Toast.LENGTH_SHORT).show()
         }
     }
     LaunchedEffect(chatId) { viewModel.openChat(chatId) }
@@ -280,7 +296,10 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                     pendingMedia?.let { media ->
                         PendingMediaPreview(
                             media = media,
-                            onRemove = { pendingMedia = null },
+                            onRemove = {
+                                File(media.path).delete()
+                                pendingMedia = null
+                            },
                         )
                     }
                     if (draft.text.isNotEmpty()) {
@@ -362,7 +381,17 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
         Box(Modifier.fillMaxSize().padding(padding).background(MaterialTheme.colorScheme.background)) {
             if (chatMessages.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No messages yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    when {
+                        historyState?.isLoadingInitial == true -> CircularProgressIndicator()
+                        historyState?.initialLoadError != null -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                "Couldn't load messages: ${historyState.initialLoadError}",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            TextButton(onClick = { viewModel.openChat(chatId) }) { Text("Retry") }
+                        }
+                        else -> Text("No messages yet", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             } else {
                 LazyColumn(
@@ -384,6 +413,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                                 showSenderAvatar = chat?.isGroup == true,
                                 senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
                                 senderAvatarRevision = message.senderUserId?.let { users[it]?.avatarRevision } ?: 0L,
+                                transfers = transfers,
                                 onOpenLink = { target ->
                                     val chatTarget = telegramChatTarget(target)
                                     if (chatTarget != null) {
@@ -397,11 +427,26 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                                     }
                                 },
                                 onDownloadFile = viewModel::downloadFile,
+                                onCancelDownload = viewModel::cancelDownload,
+                                onRetryMessage = { viewModel.retryMessage(chatId, it) },
                                 onLongClick = { selectedMessage = it },
                             )
                         }
                     }
                 }
+            }
+            if (chatMessages.isNotEmpty() && historyError != null) {
+                Snackbar(
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp),
+                    action = { TextButton(onClick = retryHistoryLoad) { Text("Retry") } },
+                ) {
+                    Text("Couldn't load messages: $historyError")
+                }
+            }
+            if (chatMessages.isNotEmpty() && (historyState?.isLoadingInitial == true || historyState?.isLoadingOlder == true)) {
+                LinearProgressIndicator(
+                    modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+                )
             }
             if (showJumpToLatest) {
                 SmallFloatingActionButton(
@@ -505,21 +550,22 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
             text = {
                 Column {
                     Text(messageAnnotatedString(target), style = MaterialTheme.typography.bodyMedium, maxLines = 3)
-                    target.mediaFileId?.let { fileId ->
+                    (target.mediaFullFileId ?: target.mediaFileId)?.let { fileId ->
                         val mediaType = target.mediaType ?: MediaType.DOCUMENT
+                        val mediaPath = target.mediaFullPath ?: target.mediaPath
                         TextButton(
                             onClick = {
-                                viewModel.saveMediaToGallery(fileId, mediaType, target.mediaName, target.mediaPath)
+                                viewModel.saveMediaToGallery(fileId, mediaType, target.mediaName, mediaPath)
                                 selectedMessage = null
                             },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text(if (target.mediaPath != null) "Save to device" else "Download and save")
+                            Text(if (mediaPath != null) "Save to device" else "Download and save")
                         }
                         TextButton(
                             onClick = {
-                                if (target.mediaPath != null) {
-                                    shareMedia(context, target.mediaPath, mediaType)
+                                if (mediaPath != null) {
+                                    shareMedia(context, mediaPath, mediaType)
                                 } else {
                                     viewModel.downloadFile(fileId)
                                 }
@@ -527,7 +573,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                             },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text(if (target.mediaPath != null) "Share / export" else "Download media")
+                            Text(if (mediaPath != null) "Share / export" else "Download full media")
                         }
                     }
                     TextButton(
@@ -640,11 +686,26 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     }
 }
 
-private fun android.net.Uri.copyToCache(context: android.content.Context): String? = runCatching {
-    val target = File.createTempFile("chatwave_upload_", ".bin", context.cacheDir)
-    context.contentResolver.openInputStream(this)?.use { input -> target.outputStream().use(input::copyTo) }
-    target.absolutePath
-}.getOrNull()
+private fun android.net.Uri.copyToCache(context: android.content.Context): String? {
+    val target = runCatching { File.createTempFile("chatwave_upload_", ".bin", context.cacheDir) }.getOrNull()
+        ?: return null
+    return try {
+        val input = context.contentResolver.openInputStream(this) ?: run {
+            target.delete()
+            return null
+        }
+        input.use { source ->
+            target.outputStream().use { output -> source.copyTo(output) }
+        }
+        if (target.length() > 0L) target.absolutePath else {
+            target.delete()
+            null
+        }
+    } catch (_: Exception) {
+        target.delete()
+        null
+    }
+}
 
 private fun shareMedia(context: android.content.Context, path: String, mediaType: MediaType) {
     val source = File(path).takeIf { it.isFile } ?: return
@@ -724,8 +785,11 @@ private fun MessageBubble(
     showSenderAvatar: Boolean,
     senderAvatarPath: String?,
     senderAvatarRevision: Long,
+    transfers: Map<Int, TransferState>,
     onOpenLink: (String) -> Unit,
     onDownloadFile: (Int) -> Unit,
+    onCancelDownload: (Int) -> Unit,
+    onRetryMessage: (MessageSummary) -> Unit,
     onLongClick: (MessageSummary) -> Unit,
 ) {
     val outgoing = message.isOutgoing
@@ -774,15 +838,38 @@ private fun MessageBubble(
             }
             message.mediaType?.let { type ->
                 when (type) {
-                    MediaType.PHOTO -> if (message.mediaPath != null) {
-                        MediaImage(message.mediaPath)
-                    } else {
-                        MediaAttachment("Photo", Icons.Default.InsertDriveFile, message.mediaFileId?.let { { onDownloadFile(it) } })
-                    }
-                    MediaType.VIDEO -> MediaAttachment("Video${message.mediaName?.let { " · $it" }.orEmpty()}", Icons.Default.PlayArrow, message.mediaFileId?.let { { onDownloadFile(it) } })
-                    MediaType.DOCUMENT -> MediaAttachment(message.mediaName ?: "Document", Icons.Default.InsertDriveFile, message.mediaFileId?.let { { onDownloadFile(it) } })
-                    MediaType.AUDIO -> MediaAttachment(message.mediaName ?: "Audio", Icons.Default.Audiotrack, message.mediaFileId?.let { { onDownloadFile(it) } })
-                    MediaType.VOICE -> MediaAttachment("Voice message", Icons.Default.Audiotrack, message.mediaFileId?.let { { onDownloadFile(it) } })
+                    MediaType.PHOTO -> (message.mediaFullPath ?: message.mediaPath)?.let { path ->
+                        MediaImage(path)
+                    } ?: MediaAttachment(
+                        "Photo", Icons.Default.InsertDriveFile,
+                        transfer = message.mediaFileId?.let(transfers::get),
+                        onDownload = message.mediaFileId?.let { { onDownloadFile(it) } },
+                        onCancel = message.mediaFileId?.let { { onCancelDownload(it) } },
+                    )
+                    MediaType.VIDEO -> MediaAttachment(
+                        "Video${message.mediaName?.let { " · $it" }.orEmpty()}", Icons.Default.PlayArrow,
+                        transfer = message.mediaFileId?.let(transfers::get),
+                        onDownload = message.mediaFileId?.let { { onDownloadFile(it) } },
+                        onCancel = message.mediaFileId?.let { { onCancelDownload(it) } },
+                    )
+                    MediaType.DOCUMENT -> MediaAttachment(
+                        message.mediaName ?: "Document", Icons.Default.InsertDriveFile,
+                        transfer = message.mediaFileId?.let(transfers::get),
+                        onDownload = message.mediaFileId?.let { { onDownloadFile(it) } },
+                        onCancel = message.mediaFileId?.let { { onCancelDownload(it) } },
+                    )
+                    MediaType.AUDIO -> MediaAttachment(
+                        message.mediaName ?: "Audio", Icons.Default.Audiotrack,
+                        transfer = message.mediaFileId?.let(transfers::get),
+                        onDownload = message.mediaFileId?.let { { onDownloadFile(it) } },
+                        onCancel = message.mediaFileId?.let { { onCancelDownload(it) } },
+                    )
+                    MediaType.VOICE -> MediaAttachment(
+                        "Voice message", Icons.Default.Audiotrack,
+                        transfer = message.mediaFileId?.let(transfers::get),
+                        onDownload = message.mediaFileId?.let { { onDownloadFile(it) } },
+                        onCancel = message.mediaFileId?.let { { onCancelDownload(it) } },
+                    )
                     MediaType.LOCATION -> MediaAttachment("Location", Icons.Default.LocationOn)
                 }
             }
@@ -811,7 +898,35 @@ private fun MessageBubble(
                 Text(formatMessageTime(message.dateEpochSeconds), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (outgoing) {
                     Spacer(Modifier.size(2.dp))
-                    Icon(if (message.isRead) Icons.Default.DoneAll else Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp))
+                    when (message.sendState) {
+                        com.example.tgclient.model.MessageSendState.SENDING -> CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
+                        com.example.tgclient.model.MessageSendState.FAILED -> Icon(Icons.Default.Close, contentDescription = "Failed to send", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(15.dp))
+                        null -> Icon(if (message.isRead) Icons.Default.DoneAll else Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp))
+                    }
+                }
+            }
+            if (outgoing && message.sendState == com.example.tgclient.model.MessageSendState.FAILED) {
+                Text(
+                    message.sendError ?: "Message could not be sent",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+                var currentEpoch by remember(message.id, message.retrySendAtEpochSeconds) {
+                    mutableStateOf(System.currentTimeMillis() / 1000L)
+                }
+                LaunchedEffect(message.retrySendAtEpochSeconds) {
+                    while (currentEpoch < message.retrySendAtEpochSeconds) {
+                        delay(1_000)
+                        currentEpoch = System.currentTimeMillis() / 1000L
+                    }
+                }
+                if (message.canRetrySend && message.retrySendAtEpochSeconds <= currentEpoch) {
+                    TextButton(onClick = { onRetryMessage(message) }, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 2.dp, vertical = 0.dp)) {
+                        Text("Retry", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelMedium)
+                    }
+                } else if (message.canRetrySend && message.retrySendAtEpochSeconds > currentEpoch) {
+                    Text("Retry available later", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -929,7 +1044,7 @@ private fun MessageSummary.toTextFieldValue(): TextFieldValue {
     return TextFieldValue(builder.toAnnotatedString(), TextRange(text.length))
 }
 
-private fun messageAnnotatedString(message: MessageSummary): AnnotatedString {
+internal fun messageAnnotatedString(message: MessageSummary): AnnotatedString {
     val builder = AnnotatedString.Builder()
     builder.append(message.text)
     val occupiedLinks = mutableListOf<IntRange>()
@@ -957,7 +1072,7 @@ private data class MessageLink(val start: Int, val end: Int, val target: String)
 private fun detectMessageLinks(text: String): List<MessageLink> {
     val links = mutableListOf<MessageLink>()
     val patterns = listOf(
-        Regex("(?i)(?<![\\w@])((?:https?://|www\\.|t\\.me/|telegram\\.me/)[^\\s<>()]+)"),
+        Regex("(?i)(?<![\\w@])((?:https?://|tg://|www\\.|t\\.me/|telegram\\.me/)[^\\s<>()]+)"),
         Regex("(?<![\\w@])@([A-Za-z][A-Za-z0-9_]{4,31})"),
         Regex("(?<![\\w-])-100\\d{5,20}(?!\\w)"),
     )
@@ -998,7 +1113,7 @@ private fun normalizeLinkTarget(raw: String): String {
 
 private fun linkStyle() = SpanStyle(textDecoration = TextDecoration.Underline, color = Color(0xFF2A8BE7))
 
-private fun telegramChatTarget(raw: String): String? {
+internal fun telegramChatTarget(raw: String): String? {
     val value = raw.trim()
     if (value.matches(Regex("-100\\d{5,20}"))) return value
     if (value.startsWith("https://t.me/", ignoreCase = true) || value.startsWith("http://t.me/", ignoreCase = true) ||
@@ -1054,20 +1169,46 @@ private fun MediaImage(path: String) {
 private fun MediaAttachment(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    transfer: TransferState? = null,
     onDownload: (() -> Unit)? = null,
+    onCancel: (() -> Unit)? = null,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp))
-        Spacer(Modifier.size(8.dp))
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
-        if (onDownload != null) {
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = onDownload) { Text("Download") }
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp))
+            Spacer(Modifier.size(8.dp))
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+            if (transfer?.isActive == true) {
+                if (transfer.isUploading) {
+                    Text("Uploading…", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    TextButton(onClick = { onCancel?.invoke() }) { Text("Cancel") }
+                }
+            } else if (onDownload != null && transfer?.isCompleted != true) {
+                TextButton(onClick = onDownload) { Text(if (transfer?.downloadedBytes ?: 0L > 0L) "Retry" else "Download") }
+            }
+        }
+        if (transfer?.isActive == true) {
+            val progress = if (transfer.totalBytes > 0L) {
+                (transfer.downloadedBytes.toFloat() / transfer.totalBytes.toFloat()).coerceIn(0f, 1f)
+            } else 0f
+            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().padding(start = 38.dp, end = 8.dp))
+            Text(
+                if (transfer.totalBytes > 0L) {
+                    "${formatBytes(transfer.downloadedBytes)} of ${formatBytes(transfer.totalBytes)}"
+                } else if (transfer.isUploading) "Uploading…" else "Downloading…",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 38.dp, top = 2.dp),
+            )
         }
     }
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1_048_576L -> "%.1f MB".format(Locale.getDefault(), bytes / 1_048_576.0)
+    bytes >= 1_024L -> "%.0f KB".format(Locale.getDefault(), bytes / 1_024.0)
+    else -> "$bytes B"
 }
 
 private fun formatMessageTime(epochSeconds: Int): String {

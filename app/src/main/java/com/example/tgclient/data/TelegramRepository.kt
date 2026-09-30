@@ -8,14 +8,18 @@ import com.example.tgclient.model.AppSettings
 import com.example.tgclient.model.AuthAction
 import com.example.tgclient.model.AuthState
 import com.example.tgclient.model.ChatFolder
+import com.example.tgclient.model.ChatHistoryState
+import com.example.tgclient.model.ChatListLoadState
 import com.example.tgclient.model.ChatSummary
 import com.example.tgclient.model.GroupActivityState
 import com.example.tgclient.model.GroupSpeakerStat
 import com.example.tgclient.model.MediaType
 import com.example.tgclient.model.MessageEntity
+import com.example.tgclient.model.MessageSendState
 import com.example.tgclient.model.MessageSummary
 import com.example.tgclient.model.TelegramUser
 import com.example.tgclient.model.TransferState
+import com.example.tgclient.model.TdConnectionStatus
 import com.example.tgclient.model.VerificationCodeState
 import com.example.tgclient.notifications.TelegramNotificationController
 import com.example.tgclient.security.DatabaseKeyStore
@@ -26,12 +30,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,6 +46,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
 
@@ -48,13 +55,16 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val repositoryJob = SupervisorJob(scope.coroutineContext[Job])
     private val repositoryScope = CoroutineScope(scope.coroutineContext + repositoryJob)
     private val updateScope = CoroutineScope(repositoryJob + Dispatchers.Default.limitedParallelism(1))
+    private val chatPublication = CoalescedAction(updateScope, CHAT_PUBLICATION_COALESCE_MS, ::publishChats)
     private val retentionScope = CoroutineScope(repositoryJob + Dispatchers.IO)
     private val client: TdLibClient?
-    private val notificationController = TelegramNotificationController(context)
+    private val notificationController = TelegramNotificationController(context, accountId)
     private val messageRetentionStore = MessageRetentionStore(context, accountId)
     private val _authState = MutableStateFlow<AuthState>(AuthState.Loading)
     private val _chats = MutableStateFlow<List<ChatSummary>>(emptyList())
+    private val _chatListLoadState = MutableStateFlow(ChatListLoadState())
     private val _messages = MutableStateFlow<Map<Long, List<MessageSummary>>>(emptyMap())
+    private val _chatHistory = MutableStateFlow<Map<Long, ChatHistoryState>>(emptyMap())
     private val _users = MutableStateFlow<Map<Long, TelegramUser>>(emptyMap())
     private val _currentUser = MutableStateFlow<TelegramUser?>(null)
     private val _verification = MutableStateFlow(VerificationCodeState())
@@ -66,6 +76,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val lastStableAuthState = AtomicReference<AuthState>(AuthState.Loading)
     private val _groupActivity = MutableStateFlow<Map<Long, GroupActivityState>>(emptyMap())
     private val _transfers = MutableStateFlow<Map<Int, TransferState>>(emptyMap())
+    private val _connectionStatus = MutableStateFlow(TdConnectionStatus.UNKNOWN)
     private val settingsPreferences = context.getSharedPreferences("chatwave_settings", Context.MODE_PRIVATE)
     private val folderPreferences = context.getSharedPreferences("chatwave_chat_folders_$accountId", Context.MODE_PRIVATE)
     private val _settings = MutableStateFlow(loadSettings())
@@ -79,12 +90,16 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val requestedUsers = ConcurrentHashMap.newKeySet<Long>()
     private val localPinOverrides = ConcurrentHashMap<Long, Boolean>()
     private val historyCursors = ConcurrentHashMap<Long, HistoryCursor>()
-    private val retainedMessageWrites = Channel<MessageSummary>(Channel.UNLIMITED)
+    private val chatsLoadGuard = AtomicBoolean(false)
+    private val allMainChatsLoaded = AtomicBoolean(false)
+    private val retainedMessageWrites = Channel<RetentionEvent>(Channel.UNLIMITED)
     private lateinit var retentionWriterJob: Job
 
     val authState: StateFlow<AuthState> = _authState.asStateFlow()
     val chats: StateFlow<List<ChatSummary>> = _chats.asStateFlow()
+    val chatListLoadState: StateFlow<ChatListLoadState> = _chatListLoadState.asStateFlow()
     val messages: StateFlow<Map<Long, List<MessageSummary>>> = _messages.asStateFlow()
+    val chatHistory: StateFlow<Map<Long, ChatHistoryState>> = _chatHistory.asStateFlow()
     val users: StateFlow<Map<Long, TelegramUser>> = _users.asStateFlow()
     val currentUser: StateFlow<TelegramUser?> = _currentUser.asStateFlow()
     val verification: StateFlow<VerificationCodeState> = _verification.asStateFlow()
@@ -93,19 +108,26 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     val operationError: StateFlow<String?> = _operationError.asStateFlow()
     val groupActivity: StateFlow<Map<Long, GroupActivityState>> = _groupActivity.asStateFlow()
     val transfers: StateFlow<Map<Int, TransferState>> = _transfers.asStateFlow()
+    val connectionStatus: StateFlow<TdConnectionStatus> = _connectionStatus.asStateFlow()
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
     val chatFolders: StateFlow<List<ChatFolder>> = _chatFolders.asStateFlow()
 
     init {
         retentionWriterJob = retentionScope.launch {
-            for (firstMessage in retainedMessageWrites) {
-                val batch = mutableListOf(firstMessage)
+            for (firstEvent in retainedMessageWrites) {
+                val batch = mutableListOf(firstEvent)
                 delay(RETENTION_WRITE_BATCH_DELAY_MS)
                 while (true) {
                     val next = retainedMessageWrites.tryReceive().getOrNull() ?: break
                     batch += next
                 }
-                runCatching { messageRetentionStore.saveAll(batch) }
+                try {
+                    persistRetentionEvents(batch)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    reportOperationError(error)
+                }
             }
         }
         updateScope.launch {
@@ -127,27 +149,21 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             // messages and files on Main made the UI freeze and let the update queue
             // grow faster than it could drain.
             client?.updates?.onEach(::handleUpdate)?.launchIn(updateScope)
-            client?.start()
+            client?.start(
+                onAuthorizationState = ::applyAuthorizationState,
+                onFailure = { _authState.value = AuthState.Error("Telegram couldn't initialize. Check the connection, then retry session restore.") },
+            )
         }
     }
 
     fun submitPhoneNumber(phoneNumber: String) = runAuthRequest(
         action = AuthAction.SubmitPhone,
         type = "setAuthenticationPhoneNumber",
-        fields = JSONObject()
-            .put("phone_number", phoneNumber)
-            .put(
-                "settings",
-                JSONObject()
-                    .put("@type", "phoneNumberAuthenticationSettings")
-                    .put("allow_flash_call", false)
-                    .put("allow_missed_call", false)
-                    .put("is_current_phone_number", false)
-                    .put("has_unknown_phone_number", true)
-                    .put("allow_sms_retriever_api", false)
-                    .put("firebase_authentication_settings", JSONObject.NULL)
-                    .put("authentication_tokens", JSONArray()),
-            ),
+        fields = JSONObject().apply {
+            val request = phoneAuthenticationRequest(phoneNumber)
+            put("phone_number", request.phoneNumber)
+            put("settings", JSONObject.NULL)
+        },
     )
     fun submitEmailAddress(emailAddress: String) = runAuthRequest(
         AuthAction.SubmitEmail,
@@ -218,11 +234,31 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         _operationError.value = error.safeMessage()
     }
 
+    private fun launchOperation(operation: suspend () -> Unit) {
+        repositoryScope.launch {
+            try {
+                operation()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportOperationError(error)
+            }
+        }
+    }
+
+    fun clearOperationError() {
+        _operationError.value = null
+    }
+
     suspend fun updateProfile(firstName: String, lastName: String, username: String) {
-        runCatching {
+        try {
             client?.request("setName", JSONObject().put("first_name", firstName).put("last_name", lastName))
             client?.request("setUsername", JSONObject().put("username", username.removePrefix("@")))
             loadCurrentUser()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            reportOperationError(error)
         }
     }
 
@@ -230,13 +266,17 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     suspend fun resolveChatTarget(target: String): Long? {
         val cleanTarget = target.trim().removePrefix("@").takeIf { it.isNotBlank() } ?: return null
         val numericId = cleanTarget.toLongOrNull()
-        val chat = runCatching {
+        val chat = try {
             if (numericId != null) {
                 client?.request("getChat", JSONObject().put("chat_id", numericId))
             } else {
                 client?.request("searchPublicChat", JSONObject().put("username", cleanTarget))
             }
-        }.getOrNull() ?: return null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        } ?: return null
         val chatId = chat.optLong("id").takeIf { it != 0L } ?: return null
         chatCache[chatId] = chat
         publishChats()
@@ -245,14 +285,52 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
 
     /** Removes this TDLib session from the device without deleting the Telegram account. */
     suspend fun removeFromDevice() {
-        runCatching { client?.request("logOut") }
-        close()
+        try {
+            withTimeoutOrNull(ACCOUNT_REMOVAL_LOGOUT_TIMEOUT_MS) { client?.request("logOut") }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Device removal must continue even when Telegram can't confirm logout.
+        } finally {
+            close()
+            retainedMessageWrites.cancel()
+            retentionWriterJob.cancelAndJoin()
+            withContext(Dispatchers.IO) { messageRetentionStore.clear() }
+        }
     }
 
     fun close() {
         client?.close()
         retainedMessageWrites.close()
-        retentionWriterJob.invokeOnCompletion { repositoryJob.cancel() }
+        retentionWriterJob.invokeOnCompletion {
+            messageRetentionStore.close()
+            repositoryJob.cancel()
+        }
+    }
+
+    fun retrySessionRestore() {
+        val activeClient = client ?: return
+        _authError.value = null
+        _authState.value = AuthState.Loading
+        if (!activeClient.isStarted) {
+            activeClient.start(
+                onAuthorizationState = ::applyAuthorizationState,
+                onFailure = { _authState.value = AuthState.Error("Telegram couldn't initialize. Check the connection, then retry session restore.") },
+            )
+            return
+        }
+        repositoryScope.launch {
+            try {
+                val authorizationState = activeClient.request("getAuthorizationState")
+                applyAuthorizationState(authorizationState)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _authState.value = AuthState.Error(
+                    error.safeMessage().ifBlank { "Unable to restore the Telegram session. Check your connection and retry." },
+                )
+            }
+        }
     }
 
     fun logout() {
@@ -302,75 +380,86 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     fun leaveChat(chatId: Long) {
-        repositoryScope.launch {
-            runCatching { client?.request("leaveChat", JSONObject().put("chat_id", chatId)) }
-                .onSuccess {
-                    chatCache.remove(chatId)
-                    historyCursors.remove(chatId)
-                    _messages.value = _messages.value - chatId
-                    publishChats()
-                }
-                .onFailure(::reportOperationError)
+        launchOperation {
+            client?.request("leaveChat", JSONObject().put("chat_id", chatId))
+            chatCache.remove(chatId)
+            historyCursors.remove(chatId)
+            _messages.update { it - chatId }
+            publishChats()
         }
     }
 
     fun deleteChatHistory(chatId: Long) {
-        repositoryScope.launch {
-            runCatching {
-                client?.request(
-                    "deleteChatHistory",
-                    JSONObject()
-                        .put("chat_id", chatId)
-                        .put("remove_from_chat_list", false)
-                        .put("revoke", false),
-                )
-            }.onSuccess {
-                historyCursors.remove(chatId)
-                _messages.value = _messages.value + (chatId to emptyList())
-            }.onFailure(::reportOperationError)
+        launchOperation {
+            client?.request(
+                "deleteChatHistory",
+                JSONObject()
+                    .put("chat_id", chatId)
+                    .put("remove_from_chat_list", false)
+                    .put("revoke", false),
+            )
+            historyCursors.remove(chatId)
+            _messages.update { it + (chatId to emptyList()) }
         }
     }
 
     fun toggleChatPinned(chatId: Long, pinned: Boolean) {
-        repositoryScope.launch {
-            runCatching {
-                client?.request(
-                    "toggleChatIsPinned",
-                    JSONObject()
-                        .put("chat_list", JSONObject().put("@type", "chatListMain"))
-                        .put("chat_id", chatId)
-                        .put("is_pinned", pinned),
-                )
-            }.onSuccess {
-                localPinOverrides[chatId] = pinned
-                publishChats()
-            }.onFailure(::reportOperationError)
+        launchOperation {
+            client?.request(
+                "toggleChatIsPinned",
+                JSONObject()
+                    .put("chat_list", JSONObject().put("@type", "chatListMain"))
+                    .put("chat_id", chatId)
+                    .put("is_pinned", pinned),
+            )
+            localPinOverrides[chatId] = pinned
+            publishChats()
         }
     }
 
     fun toggleChatMarkedAsUnread(chatId: Long, markedAsUnread: Boolean) {
-        repositoryScope.launch {
-            runCatching {
-                client?.request(
-                    "toggleChatIsMarkedAsUnread",
-                    JSONObject().put("chat_id", chatId).put("is_marked_as_unread", markedAsUnread),
-                )
-            }.onSuccess {
-                chatCache[chatId]?.put("is_marked_as_unread", markedAsUnread)
-                publishChats()
-            }.onFailure(::reportOperationError)
+        launchOperation {
+            client?.request(
+                "toggleChatIsMarkedAsUnread",
+                JSONObject().put("chat_id", chatId).put("is_marked_as_unread", markedAsUnread),
+            )
+            chatCache[chatId]?.put("is_marked_as_unread", markedAsUnread)
+            publishChats()
         }
     }
 
     suspend fun loadChats(limit: Int = 100) {
-        runCatching {
-            client?.request("getChats", JSONObject().put("chat_list", JSONObject().put("@type", "chatListMain")).put("limit", limit))
-        }.onFailure(::reportOperationError)
+        if (allMainChatsLoaded.get()) {
+            _chatListLoadState.update { it.copy(allChatsLoaded = true, isLoading = false) }
+            return
+        }
+        if (!chatsLoadGuard.compareAndSet(false, true)) return
+        _chatListLoadState.update { it.copy(isLoading = true, error = null) }
+        try {
+            client?.request("loadChats", JSONObject().put("chat_list", JSONObject().put("@type", "chatListMain")).put("limit", limit.coerceIn(1, 100)))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: TelegramException) {
+            if (error.code == 404) {
+                allMainChatsLoaded.set(true)
+                _chatListLoadState.update { it.copy(allChatsLoaded = true, error = null) }
+            } else {
+                _chatListLoadState.update { it.copy(error = error.safeMessage()) }
+                reportOperationError(error)
+            }
+        } catch (error: Exception) {
+            _chatListLoadState.update { it.copy(error = error.safeMessage()) }
+            reportOperationError(error)
+        } finally {
+            chatsLoadGuard.set(false)
+            _chatListLoadState.update { it.copy(isLoading = false) }
+        }
     }
 
     suspend fun loadMessages(chatId: Long, limit: Int = 50) {
         val cursor = beginHistoryLoad(chatId, initial = true) ?: return
-        runCatching {
+        updateChatHistoryState(chatId) { it.copy(isLoadingInitial = true, initialLoadError = null) }
+        try {
             // Supergroups and channels only receive their full chat updates
             // after the chat has been opened. Open it before requesting the
             // history so group conversations are hydrated from TDLib rather
@@ -385,40 +474,88 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 publishChats()
             }
             val isChannel = chat?.isChannelChat() ?: chatCache[chatId]?.isChannelChat() == true
-            val batch = fetchHistory(chatId, isChannel, limit, cursor.oldestMessageId, initial = true)
+            val batch = fetchHistory(chatId, isChannel, limit, cursor.oldestMessageId)
             val loaded = batch.messages
             if (_settings.value.retainDeletedMessages) withContext(Dispatchers.IO) { messageRetentionStore.saveAll(loaded) }
             if (_settings.value.saveToGallery) loaded.forEach(::maybeAutoSaveMedia)
-            val merged = mergeMessages(_messages.value[chatId].orEmpty(), loaded)
             val retained = if (_settings.value.retainDeletedMessages) {
-                withContext(Dispatchers.IO) { messageRetentionStore.loadChat(chatId) }
+                withContext(Dispatchers.IO) { messageRetentionStore.loadChat(chatId, limit.coerceIn(1, RETAINED_INITIAL_PAGE_SIZE)) }
             } else {
                 emptyList()
             }
-            _messages.value = _messages.value + (chatId to mergeMessages(merged, retained))
-            updateHistoryCursor(cursor, batch, initial = true)
-        }.onFailure(::reportOperationError)
-            .also { finishHistoryLoad(cursor) }
+            withContext(Dispatchers.Default) {
+                _messages.updateTimeline(chatId) { mergeMessages(it, loaded + retained) }
+            }
+            val merged = _messages.value[chatId].orEmpty()
+            val oldest = merged.firstOrNull()
+            val hasRetainedOlder = oldest != null && _settings.value.retainDeletedMessages &&
+                withContext(Dispatchers.IO) { messageRetentionStore.hasChatBefore(chatId, oldest) }
+            val hasMore = batch.hasMore || hasRetainedOlder
+            updateHistoryCursor(cursor, batch, initial = true, hasRetainedOlder = hasRetainedOlder)
+            updateChatHistoryState(chatId) {
+                it.copy(
+                    hasLoadedInitial = true,
+                    hasOlderMessages = hasMore,
+                    initialLoadError = null,
+                    olderLoadError = null,
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            updateChatHistoryState(chatId) { it.copy(initialLoadError = error.safeMessage()) }
+        } finally {
+            finishHistoryLoad(cursor)
+            updateChatHistoryState(chatId) { it.copy(isLoadingInitial = false) }
+        }
     }
 
     /** Loads the next older page when the user reaches the top of a conversation. */
     suspend fun loadOlderMessages(chatId: Long, limit: Int = 50) {
         val cursor = beginHistoryLoad(chatId, initial = false) ?: return
-        runCatching {
+        updateChatHistoryState(chatId) { it.copy(isLoadingOlder = true, olderLoadError = null) }
+        try {
             val isChannel = chatCache[chatId]?.isChannelChat() == true
-            val batch = fetchHistory(chatId, isChannel, limit, cursor.oldestMessageId, initial = false)
+            val existing = _messages.value[chatId].orEmpty()
+            val before = existing.firstOrNull()
+            val batch = if (cursor.serverHasMore && cursor.oldestMessageId != 0L) {
+                fetchHistory(chatId, isChannel, limit, cursor.oldestMessageId)
+            } else {
+                HistoryBatch(emptyList(), cursor.oldestMessageId, hasMore = false)
+            }
             val loaded = batch.messages
             if (_settings.value.retainDeletedMessages) withContext(Dispatchers.IO) { messageRetentionStore.saveAll(loaded) }
             if (_settings.value.saveToGallery) loaded.forEach(::maybeAutoSaveMedia)
-            val retained = if (_settings.value.retainDeletedMessages) {
-                withContext(Dispatchers.IO) { messageRetentionStore.loadChat(chatId) }
+            val retained = if (_settings.value.retainDeletedMessages && before != null) {
+                withContext(Dispatchers.IO) { messageRetentionStore.loadChatBefore(chatId, before, limit) }
             } else {
                 emptyList()
             }
-            _messages.value = _messages.value + (chatId to mergeMessages(_messages.value[chatId].orEmpty() + loaded, retained))
-            updateHistoryCursor(cursor, batch, initial = false)
-        }.onFailure(::reportOperationError)
-            .also { finishHistoryLoad(cursor) }
+            withContext(Dispatchers.Default) {
+                _messages.updateTimeline(chatId) { mergeMessages(it, loaded + retained) }
+            }
+            val merged = _messages.value[chatId].orEmpty()
+            val oldest = merged.firstOrNull()
+            val hasRetainedOlder = oldest != null && _settings.value.retainDeletedMessages &&
+                withContext(Dispatchers.IO) { messageRetentionStore.hasChatBefore(chatId, oldest) }
+            val hasMore = batch.hasMore || hasRetainedOlder
+            updateHistoryCursor(cursor, batch, initial = false, hasRetainedOlder = hasRetainedOlder)
+            updateChatHistoryState(chatId) { it.copy(hasOlderMessages = hasMore, olderLoadError = null) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            updateChatHistoryState(chatId) { it.copy(olderLoadError = error.safeMessage()) }
+        } finally {
+            finishHistoryLoad(cursor)
+            updateChatHistoryState(chatId) { it.copy(isLoadingOlder = false) }
+        }
+    }
+
+    private fun updateChatHistoryState(chatId: Long, transform: (ChatHistoryState) -> ChatHistoryState) {
+        _chatHistory.update { states ->
+            val current = states[chatId] ?: ChatHistoryState()
+            states + (chatId to transform(current))
+        }
     }
 
     fun closeChat(chatId: Long) {
@@ -429,53 +566,55 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         if (_groupActivity.value[chatId]?.isLoading == true) return
         _groupActivity.value = _groupActivity.value + (chatId to GroupActivityState(isLoading = true))
         try {
-            val cutoff = System.currentTimeMillis() / 1000L - ACTIVITY_WINDOW_SECONDS
-            val counts = mutableMapOf<Long, Int>()
-            var fromMessageId = 0L
-            var reachedCutoff = false
-            var pages = 0
-            while (!reachedCutoff && pages < MAX_ACTIVITY_PAGES) {
-                val result = client?.request(
-                    "getChatHistory",
-                    JSONObject()
-                        .put("chat_id", chatId)
-                        .put("from_message_id", fromMessageId)
-                        .put("offset", 0)
-                        .put("limit", 100)
-                        .put("only_local", false),
-                ) ?: break
-                val messages = result.optJSONArray("messages") ?: break
-                if (messages.length() == 0) break
-                for (index in 0 until messages.length()) {
-                    val message = messages.optJSONObject(index) ?: continue
-                    val messageDate = message.optLong("date")
-                    if (messageDate in 1 until cutoff) {
-                        reachedCutoff = true
-                        break
+            withContext(Dispatchers.Default) {
+                val cutoff = System.currentTimeMillis() / 1000L - ACTIVITY_WINDOW_SECONDS
+                val counts = mutableMapOf<Long, Int>()
+                var fromMessageId = 0L
+                var reachedCutoff = false
+                var pages = 0
+                while (!reachedCutoff && pages < MAX_ACTIVITY_PAGES) {
+                    val result = client?.request(
+                        "getChatHistory",
+                        JSONObject()
+                            .put("chat_id", chatId)
+                            .put("from_message_id", fromMessageId)
+                            .put("offset", 0)
+                            .put("limit", 100)
+                            .put("only_local", false),
+                    ) ?: break
+                    val messages = result.optJSONArray("messages") ?: break
+                    if (messages.length() == 0) break
+                    for (index in 0 until messages.length()) {
+                        val message = messages.optJSONObject(index) ?: continue
+                        val messageDate = message.optLong("date")
+                        if (messageDate in 1 until cutoff) {
+                            reachedCutoff = true
+                            break
+                        }
+                        if (messageDate < cutoff || !message.isCountableActivityMessage()) continue
+                        val sender = message.optJSONObject("sender_id") ?: continue
+                        if (sender.optString("@type") != "messageSenderUser") continue
+                        val userId = sender.optLong("user_id").takeIf { it > 0L } ?: continue
+                        requestUser(userId)
+                        counts[userId] = (counts[userId] ?: 0) + 1
                     }
-                    if (messageDate < cutoff || !message.isCountableActivityMessage()) continue
-                    val sender = message.optJSONObject("sender_id") ?: continue
-                    if (sender.optString("@type") != "messageSenderUser") continue
-                    val userId = sender.optLong("user_id").takeIf { it > 0L } ?: continue
-                    requestUser(userId)
-                    counts[userId] = (counts[userId] ?: 0) + 1
+                    val lastMessageId = messages.optJSONObject(messages.length() - 1)?.optLong("id") ?: 0L
+                    if (lastMessageId <= 0L || lastMessageId == fromMessageId) break
+                    fromMessageId = lastMessageId
+                    pages += 1
                 }
-                val lastMessageId = messages.optJSONObject(messages.length() - 1)?.optLong("id") ?: 0L
-                if (lastMessageId <= 0L || lastMessageId == fromMessageId) break
-                fromMessageId = lastMessageId
-                pages += 1
+                val topUsers = counts.entries
+                    .sortedWith(compareByDescending<Map.Entry<Long, Int>> { it.value }.thenBy { it.key })
+                    .take(5)
+                    .map { (userId, count) ->
+                        GroupSpeakerStat(
+                            userId = userId,
+                            displayName = _users.value[userId]?.displayName ?: "User $userId",
+                            messageCount = count,
+                        )
+                    }
+                _groupActivity.value = _groupActivity.value + (chatId to GroupActivityState(topUsers = topUsers))
             }
-            val topUsers = counts.entries
-                .sortedWith(compareByDescending<Map.Entry<Long, Int>> { it.value }.thenBy { it.key })
-                .take(5)
-                .map { (userId, count) ->
-                    GroupSpeakerStat(
-                        userId = userId,
-                        displayName = _users.value[userId]?.displayName ?: "User $userId",
-                        messageCount = count,
-                    )
-                }
-            _groupActivity.value = _groupActivity.value + (chatId to GroupActivityState(topUsers = topUsers))
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
@@ -553,6 +692,21 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 .put("reaction", JSONObject().put("@type", "reactionTypeEmoji").put("emoji", emoji))
                 .put("is_big", false)
                 .put("update_recent_reactions", true),
+        )
+    }
+
+    fun retryMessage(chatId: Long, message: MessageSummary) {
+        val now = (System.currentTimeMillis() / 1000L).toInt()
+        if (message.chatId != chatId || message.sendState != MessageSendState.FAILED ||
+            !message.canRetrySend || message.retrySendAtEpochSeconds > now
+        ) return
+        client?.send(
+            "resendMessages",
+            JSONObject()
+                .put("chat_id", chatId)
+                .put("message_ids", JSONArray().put(message.id))
+                .put("quote", JSONObject.NULL)
+                .put("paid_message_star_count", 0),
         )
     }
 
@@ -649,19 +803,29 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
 
     fun cancelDownload(fileId: Int) = client?.send("cancelDownloadFile", JSONObject().put("file_id", fileId).put("only_pending", false))
 
-    suspend fun searchMessages(query: String, limit: Int = 50): List<MessageSummary> = runCatching {
-        client?.request("searchMessages", JSONObject().put("query", query).put("offset", 0).put("limit", limit).put("min_date", 0).put("max_date", 0).put("chat_list", JSONObject.NULL))?.optJSONArray("messages").toMessageList()
-            ?: emptyList()
-    }.getOrDefault(emptyList())
+    suspend fun searchMessages(query: String, limit: Int = 50): List<MessageSummary> = try {
+        val response = client?.request("searchMessages", JSONObject().put("query", query).put("offset", 0).put("limit", limit).put("min_date", 0).put("max_date", 0).put("chat_list", JSONObject.NULL))
+        withContext(Dispatchers.Default) { response?.optJSONArray("messages").toMessageList() }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        reportOperationError(error)
+        emptyList()
+    }
 
-    suspend fun searchChatMessages(chatId: Long, query: String, limit: Int = 50): List<MessageSummary> = runCatching {
-        client?.request("searchChatMessages", JSONObject().put("chat_id", chatId).put("query", query).put("sender_id", JSONObject.NULL).put("from_message_id", 0).put("offset", 0).put("limit", limit).put("filter", JSONObject.NULL))?.optJSONArray("messages").toMessageList()
-            ?: emptyList()
-    }.getOrDefault(emptyList())
+    suspend fun searchChatMessages(chatId: Long, query: String, limit: Int = 50): List<MessageSummary> = try {
+        val response = client?.request("searchChatMessages", JSONObject().put("chat_id", chatId).put("query", query).put("sender_id", JSONObject.NULL).put("from_message_id", 0).put("offset", 0).put("limit", limit).put("filter", JSONObject.NULL))
+        withContext(Dispatchers.Default) { response?.optJSONArray("messages").toMessageList() }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        reportOperationError(error)
+        emptyList()
+    }
 
     fun clearRetainedMessages() {
-        _messages.value = _messages.value.mapValues { (_, messages) -> messages.filterNot { it.isDeleted } }
-        repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.clear() }
+        _messages.update { timelines -> timelines.mapValues { (_, messages) -> messages.filterNot { it.isDeleted } } }
+        retainedMessageWrites.trySend(RetentionEvent.Clear)
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
@@ -669,7 +833,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val updated = transform(previous)
         _settings.value = updated
         if (!updated.retainDeletedMessages) {
-            _messages.value = _messages.value.mapValues { (_, messages) -> messages.filterNot { it.isDeleted } }
+            _messages.update { timelines -> timelines.mapValues { (_, messages) -> messages.filterNot { it.isDeleted } } }
         }
         if (updated.saveToGallery && !previous.saveToGallery) {
             _messages.value.values.flatten().forEach(::maybeAutoSaveMedia)
@@ -711,31 +875,33 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
 
     private fun handleUpdate(update: JSONObject) {
         when (update.optString("@type")) {
-            "updateAuthorizationState" -> {
-                val authorizationState = update.optJSONObject("authorization_state")
-                val stateType = authorizationState?.optString("@type")
-                _verification.value = if (stateType == "authorizationStateWaitCode") {
-                    val codeInfo = authorizationState.optJSONObject("code_info")
-                    VerificationCodeState(
-                        timeoutSeconds = codeInfo?.optInt("timeout", 0)?.coerceAtLeast(0) ?: 0,
-                        nextType = codeInfo?.optJSONObject("next_type")?.optString("@type")?.ifBlank { null },
-                    )
-                } else {
-                    VerificationCodeState()
-                }
-                authStateVersion.value += 1
-                val mappedState = AuthStateMapper.fromJson(authorizationState)
-                _authState.value = mappedState
-                if (mappedState !is AuthState.Loading && mappedState !is AuthState.LoggingOut && mappedState !is AuthState.Error) {
-                    lastStableAuthState.set(mappedState)
-                }
-                _authError.value = null
-                if (mappedState is AuthState.Ready) repositoryScope.launch { loadCurrentUser() }
+            "updateAuthorizationState" -> applyAuthorizationState(update.optJSONObject("authorization_state"))
+            "updateConnectionState" -> _connectionStatus.value = tdConnectionStatus(
+                update.optJSONObject("state")?.optString("@type").orEmpty(),
+            )
+            "updateNewChat" -> update.optJSONObject("chat")?.let { chatCache[it.optLong("id")] = it; chatPublication.request() }
+            "updateChatTitle" -> chatCache[update.optLong("chat_id")]?.put("title", update.optString("title"))?.also { chatPublication.request() }
+            "updateChatPosition" -> updateChatPosition(update)
+            "updateChatLastMessage" -> chatCache[update.optLong("chat_id")]?.let { chat ->
+                chat.put("last_message", update.optJSONObject("last_message"))
+                update.optJSONArray("positions")?.let { chat.put("positions", it) }
+                chatPublication.request()
             }
-            "updateNewChat" -> update.optJSONObject("chat")?.let { chatCache[it.optLong("id")] = it; publishChats() }
-            "updateChatTitle" -> chatCache[update.optLong("chat_id")]?.put("title", update.optString("title"))?.also { publishChats() }
-            "updateChatLastMessage" -> chatCache[update.optLong("chat_id")]?.put("last_message", update.optJSONObject("last_message"))?.also { publishChats() }
+            "updateChatDraftMessage" -> chatCache[update.optLong("chat_id")]?.let { chat ->
+                chat.put("draft_message", update.optJSONObject("draft_message"))
+                update.optJSONArray("positions")?.let { chat.put("positions", it) }
+                chatPublication.request()
+            }
+            "updateChatReadInbox" -> chatCache[update.optLong("chat_id")]?.let { chat ->
+                chat.put("unread_count", update.optInt("unread_count"))
+                chat.put("last_read_inbox_message_id", update.optLong("last_read_inbox_message_id"))
+                chatPublication.request()
+            }
+            "updateChatIsMarkedAsUnread" -> chatCache[update.optLong("chat_id")]?.put("is_marked_as_unread", update.optBoolean("is_marked_as_unread"))?.also { chatPublication.request() }
+            "updateChatRemovedFromList" -> removeChatFromList(update)
             "updateNewMessage" -> update.optJSONObject("message")?.let(::publishMessage)
+            "updateMessageSendSucceeded" -> updateMessageSendSucceeded(update)
+            "updateMessageSendFailed" -> updateMessageSendFailed(update)
             "updateMessageContent" -> updateMessageContent(update)
             "updateDeleteMessages" -> deletePublishedMessages(update)
             "updateMessageIsPinned" -> updateMessagePinned(update)
@@ -745,9 +911,76 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         }
     }
 
+    private fun applyAuthorizationState(authorizationState: JSONObject?) {
+        val stateType = authorizationState?.optString("@type")
+        _verification.value = if (stateType == "authorizationStateWaitCode") {
+            val codeInfo = authorizationState.optJSONObject("code_info")
+            VerificationCodeState(
+                timeoutSeconds = codeInfo?.optInt("timeout", 0)?.coerceAtLeast(0) ?: 0,
+                nextType = codeInfo?.optJSONObject("next_type")?.optString("@type")?.ifBlank { null },
+            )
+        } else {
+            VerificationCodeState()
+        }
+        authStateVersion.value += 1
+        val mappedState = AuthStateMapper.fromJson(authorizationState)
+        _authState.value = mappedState
+        if (mappedState !is AuthState.Loading && mappedState !is AuthState.LoggingOut && mappedState !is AuthState.Error) {
+            lastStableAuthState.set(mappedState)
+        }
+        _authError.value = null
+        if (mappedState is AuthState.Ready) repositoryScope.launch { loadCurrentUser() }
+    }
+
+    private fun updateChatPosition(update: JSONObject) {
+        val chat = chatCache[update.optLong("chat_id")] ?: return
+        val position = update.optJSONObject("position") ?: return
+        val list = position.optJSONObject("list") ?: return
+        if (list.optString("@type") != "chatListMain") return
+
+        val updatedPositions = JSONArray()
+        val positions = chat.optJSONArray("positions")
+        if (positions != null) {
+            for (index in 0 until positions.length()) {
+                val existing = positions.optJSONObject(index) ?: continue
+                if (existing.optJSONObject("list")?.optString("@type") != "chatListMain") {
+                    updatedPositions.put(existing)
+                }
+            }
+        }
+        if (position.optLong("order") != 0L) updatedPositions.put(position)
+        chat.put("positions", updatedPositions)
+        chatPublication.request()
+    }
+
+    private fun removeChatFromList(update: JSONObject) {
+        val chat = chatCache[update.optLong("chat_id")] ?: return
+        val list = update.optJSONObject("chat_list") ?: return
+        if (list.optString("@type") != "chatListMain") return
+        val positions = chat.optJSONArray("positions") ?: return
+        val updatedPositions = JSONArray()
+        for (index in 0 until positions.length()) {
+            val position = positions.optJSONObject(index) ?: continue
+            if (position.optJSONObject("list")?.optString("@type") != "chatListMain") {
+                updatedPositions.put(position)
+            }
+        }
+        chat.put("positions", updatedPositions)
+        chatPublication.request()
+    }
+
     private fun publishChats() {
-        _chats.value = chatCache.values
-            .sortedWith(compareByDescending<JSONObject> { it.optBoolean("is_marked_as_unread") }.thenByDescending { it.optJSONObject("last_message")?.optInt("date") ?: 0 })
+        _chats.value = sortChatsByPosition(
+            chats = chatCache.values,
+            chatId = { it.optLong("id") },
+            positionOrder = { chat ->
+                val positions = chat.optJSONArray("positions") ?: return@sortChatsByPosition null
+                (0 until positions.length())
+                    .mapNotNull { positions.optJSONObject(it) }
+                    .firstOrNull { it.optJSONObject("list")?.optString("@type") == "chatListMain" }
+                    ?.optLong("order")
+            },
+        )
             .map(::mapChat)
     }
 
@@ -755,10 +988,48 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val chatId = message.optLong("chat_id").takeIf { it != 0L } ?: return
         val isChannel = chatCache[chatId]?.isChannelChat() == true
         val mapped = mapMessage(message, chatId, isChannel) ?: return
-        if (_settings.value.retainDeletedMessages) retainedMessageWrites.trySend(mapped)
+        if (_settings.value.retainDeletedMessages) retainedMessageWrites.trySend(RetentionEvent.Save(mapped))
         maybeAutoSaveMedia(mapped)
-        val current = _messages.value[chatId].orEmpty()
-        _messages.value = _messages.value + (chatId to mergeMessages(current, listOf(mapped)))
+        _messages.updateTimeline(chatId) { mergeMessages(it, listOf(mapped)) }
+    }
+
+    private fun updateMessageSendSucceeded(update: JSONObject) {
+        val message = update.optJSONObject("message") ?: return
+        val chatId = message.optLong("chat_id").takeIf { it != 0L } ?: return
+        val isChannel = chatCache[chatId]?.isChannelChat() == true
+        val mapped = mapMessage(message, chatId, isChannel)?.copy(
+            sendState = null,
+            sendError = null,
+            canRetrySend = false,
+            retrySendAtEpochSeconds = 0,
+        ) ?: return
+        val oldMessageId = update.optLong("old_message_id", mapped.id)
+        _messages.updateTimeline(chatId) { current ->
+            reconcileOutgoingMessage(current, oldMessageId, mapped, MessageSummary::id)
+                .let(::sortMessagesChronologically)
+        }
+    }
+
+    private fun updateMessageSendFailed(update: JSONObject) {
+        val message = update.optJSONObject("message") ?: return
+        val chatId = message.optLong("chat_id").takeIf { it != 0L } ?: return
+        val isChannel = chatCache[chatId]?.isChannelChat() == true
+        val sendingState = message.optJSONObject("sending_state")
+        val failedState = sendingState?.takeIf { it.optString("@type") == "messageSendingStateFailed" }
+        val now = (System.currentTimeMillis() / 1000L).toInt()
+        val retryAfter = failedState?.optInt("retry_after", 0)?.coerceAtLeast(0) ?: 0
+        val mapped = mapMessage(message, chatId, isChannel)?.copy(
+            sendState = MessageSendState.FAILED,
+            sendError = update.optJSONObject("error")?.optString("message")
+                ?.takeIf { it.isNotBlank() } ?: "Message could not be sent",
+            canRetrySend = failedState?.optBoolean("can_retry") == true,
+            retrySendAtEpochSeconds = if (retryAfter > 0) now + retryAfter else 0,
+        ) ?: return
+        val oldMessageId = update.optLong("old_message_id", mapped.id)
+        _messages.updateTimeline(chatId) { current ->
+            reconcileOutgoingMessage(current, oldMessageId, mapped, MessageSummary::id)
+                .let(::sortMessagesChronologically)
+        }
     }
 
     private fun updateMessageContent(update: JSONObject) {
@@ -780,24 +1051,28 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             mediaType = media?.type ?: mediaType(type),
             mediaFileId = media?.fileId,
             mediaPath = media?.fileId?.let(filePaths::get),
+            mediaFullFileId = media?.fullFileId,
+            mediaFullPath = media?.fullFileId?.let(filePaths::get),
             mediaName = media?.name,
             entities = entities,
         ) ?: return
-        if (_settings.value.retainDeletedMessages) retainedMessageWrites.trySend(replacement)
+        if (_settings.value.retainDeletedMessages) retainedMessageWrites.trySend(RetentionEvent.Save(replacement))
         maybeAutoSaveMedia(replacement)
-        _messages.value = _messages.value + (chatId to current.map { if (it.id == messageId) replacement else it })
+        _messages.updateTimeline(chatId) { latest -> latest.map { if (it.id == messageId) replacement else it } }
     }
 
     private fun deletePublishedMessages(update: JSONObject) {
+        // Cache eviction is not a server-side deletion. Removing these from
+        // the visible timeline makes older group history appear to disappear.
+        if (update.optBoolean("from_cache")) return
         val chatId = update.optLong("chat_id")
         val messageIds = update.optJSONArray("message_ids") ?: return
         val ids = (0 until messageIds.length()).map { messageIds.optLong(it) }.toSet()
         if (_settings.value.retainDeletedMessages) {
-            repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.markDeleted(chatId, ids) }
-            val current = _messages.value[chatId].orEmpty()
-            _messages.value = _messages.value + (chatId to current.map { message -> if (message.id in ids) message.copy(isDeleted = true) else message })
+            retainedMessageWrites.trySend(RetentionEvent.Deleted(chatId, ids))
+            _messages.updateTimeline(chatId) { current -> current.map { message -> if (message.id in ids) message.copy(isDeleted = true) else message } }
         } else {
-            _messages.value = _messages.value + (chatId to _messages.value[chatId].orEmpty().filterNot { it.id in ids })
+            _messages.updateTimeline(chatId) { current -> current.filterNot { it.id in ids } }
         }
     }
 
@@ -805,12 +1080,12 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val chatId = update.optLong("chat_id")
         val messageId = update.optLong("message_id")
         val isPinned = update.optBoolean("is_pinned")
-        val current = _messages.value[chatId].orEmpty()
-        _messages.value = _messages.value + (chatId to current.map { if (it.id == messageId) it.copy(isPinned = isPinned) else it })
+        _messages.updateTimeline(chatId) { current -> current.map { if (it.id == messageId) it.copy(isPinned = isPinned) else it } }
     }
 
     private fun publishFile(file: JSONObject) {
         val local = file.optJSONObject("local") ?: return
+        val remote = file.optJSONObject("remote")
         val id = file.optInt("id")
         if (id <= 0) return
         val path = local.optString("path").takeIf { it.isNotBlank() }
@@ -824,8 +1099,18 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             filePaths.remove(id)
         }
         val downloadedBytes = local.optLong("downloaded_size")
-        val totalBytes = file.optLong("size")
-        _transfers.value = _transfers.value + (id to TransferState(id, downloadedBytes, totalBytes, isCompleted && readyPath != null))
+        val transfer = FileTransferSnapshot(
+            fileId = id,
+            size = file.optLong("size"),
+            expectedSize = file.optLong("expected_size"),
+            downloadedBytes = downloadedBytes,
+            isDownloadingActive = isActive,
+            isDownloadingCompleted = isCompleted,
+            hasReadyLocalPath = readyPath != null,
+            uploadedBytes = remote?.optLong("uploaded_size") ?: 0L,
+            isUploadingActive = remote?.optBoolean("is_uploading_active") == true,
+        ).toTransferState()
+        _transfers.value = _transfers.value + (id to transfer)
         // A failed/cancelled request must release the de-duplication guard. Otherwise a
         // later user/chat update can never request this avatar again.
         if (isCompleted || !isActive) requestedDownloads.remove(id)
@@ -838,14 +1123,18 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         // state, while chat/message paths are published only when the file is complete.
         if (isCompleted && readyPath != null) {
             val revision = fileRevision(readyPath)
-            publishChats()
+            chatPublication.request()
             _currentUser.value?.takeIf { it.avatarFileId == id }?.let { _currentUser.value = it.copy(avatarPath = readyPath, avatarRevision = revision) }
             _users.value = _users.value.mapValues { (_, user) -> if (user.avatarFileId == id) user.copy(avatarPath = readyPath, avatarRevision = revision) else user }
-            _messages.value = _messages.value.mapValues { (_, messages) ->
+            _messages.update { timelines -> timelines.mapValues { (_, messages) ->
                 messages.map { message ->
-                    if (message.mediaFileId == id) message.copy(mediaPath = readyPath) else message
+                    when (id) {
+                        message.mediaFileId -> message.copy(mediaPath = readyPath)
+                        message.mediaFullFileId -> message.copy(mediaFullPath = readyPath)
+                        else -> message
+                    }
                 }
-            }
+            } }
         }
         if (_settings.value.retainDeletedMessages && isCompleted && readyPath != null) {
             repositoryScope.launch(Dispatchers.IO) { messageRetentionStore.updateMediaPath(id, readyPath) }
@@ -856,7 +1145,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             }
             if (_settings.value.saveToGallery) {
                 _messages.value.values.flatten()
-                    .filter { it.mediaFileId == id }
+                    .filter { it.mediaFileId == id || it.mediaFullFileId == id }
                     .forEach(::maybeAutoSaveMedia)
             }
         }
@@ -889,18 +1178,28 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private fun requestUser(userId: Long) {
         if (userId <= 0L || _users.value.containsKey(userId) || !requestedUsers.add(userId)) return
         repositoryScope.launch {
-            runCatching { client?.request("getUser", JSONObject().put("user_id", userId)) }
-                .onSuccess { user -> if (user != null && user.optLong("id") == userId) updateUser(user) }
-                .onFailure { requestedUsers.remove(userId) }
+            try {
+                val user = client?.request("getUser", JSONObject().put("user_id", userId))
+                if (user != null && user.optLong("id") == userId) updateUser(user)
+            } catch (cancelled: CancellationException) {
+                requestedUsers.remove(userId)
+                throw cancelled
+            } catch (_: Exception) {
+                requestedUsers.remove(userId)
+            }
         }
     }
 
     private suspend fun loadCurrentUser() {
-        runCatching {
+        try {
             client?.request("getMe")?.let { userJson ->
                 updateUser(userJson)
                 _currentUser.value = _users.value[userJson.optLong("id")]
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            reportOperationError(error)
         }
     }
 
@@ -978,11 +1277,27 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             text = text.ifBlank { mediaLabel(type) },
             dateEpochSeconds = message.optInt("date"),
             isOutgoing = message.optBoolean("is_outgoing"),
+            sendState = when (message.optJSONObject("sending_state")?.optString("@type")) {
+                "messageSendingStatePending" -> MessageSendState.SENDING
+                "messageSendingStateFailed" -> MessageSendState.FAILED
+                else -> null
+            },
+            sendError = message.optJSONObject("sending_state")
+                ?.takeIf { it.optString("@type") == "messageSendingStateFailed" }
+                ?.let { "Message could not be sent" },
+            canRetrySend = message.optJSONObject("sending_state")
+                ?.takeIf { it.optString("@type") == "messageSendingStateFailed" }
+                ?.optBoolean("can_retry") == true,
+            retrySendAtEpochSeconds = message.optJSONObject("sending_state")
+                ?.takeIf { it.optString("@type") == "messageSendingStateFailed" }
+                ?.optInt("retry_after", 0)?.coerceAtLeast(0)?.let { (System.currentTimeMillis() / 1000L).toInt() + it } ?: 0,
             isRead = false,
             mediaType = media?.type ?: mediaType(type),
             isChannelPost = channelPost,
             mediaFileId = media?.fileId,
             mediaPath = media?.fileId?.let(filePaths::get),
+            mediaFullFileId = media?.fullFileId,
+            mediaFullPath = media?.fullFileId?.let(filePaths::get),
             mediaName = media?.name,
             entities = entities,
             replyToMessageId = message.optJSONObject("reply_to")?.optLong("message_id")?.takeIf { it > 0L },
@@ -1056,14 +1371,24 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         else -> null
     }
 
-    private data class MediaInfo(val type: MediaType, val fileId: Int?, val name: String? = null)
+    private data class MediaInfo(
+        val type: MediaType,
+        val fileId: Int?,
+        val name: String? = null,
+        val fullFileId: Int? = null,
+    )
 
     private data class GallerySaveRequest(val mediaType: MediaType, val fileName: String?)
 
     private fun mediaInfo(content: JSONObject, type: String): MediaInfo? = when (type) {
         "messagePhoto" -> content.optJSONObject("photo")?.optJSONArray("sizes")?.let { sizes ->
-            val largest = (0 until sizes.length()).mapNotNull { sizes.optJSONObject(it) }.maxByOrNull { it.optInt("width") * it.optInt("height") }
-            MediaInfo(MediaType.PHOTO, largest?.optJSONObject("photo")?.optInt("id")?.takeIf { it > 0 })
+            val candidates = (0 until sizes.length()).mapNotNull { index ->
+                val size = sizes.optJSONObject(index) ?: return@mapNotNull null
+                val fileId = size.optJSONObject("photo")?.optInt("id") ?: return@mapNotNull null
+                PhotoSizeCandidate(fileId, size.optInt("width"), size.optInt("height"))
+            }
+            val selection = selectPhotoFiles(candidates)
+            MediaInfo(MediaType.PHOTO, selection.previewFileId, fullFileId = selection.fullFileId)
         }
         "messageVideo" -> MediaInfo(MediaType.VIDEO, content.optJSONObject("video")?.optJSONObject("video")?.optInt("id")?.takeIf { it > 0 })
         "messageDocument" -> MediaInfo(
@@ -1095,7 +1420,20 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             requestedDownloads.remove(fileId)
             return
         }
-        client.send("downloadFile", JSONObject().put("file_id", fileId).put("priority", priority).put("offset", 0).put("limit", 0).put("synchronous", false))
+        updateScope.launch {
+            try {
+                // Already cached files may be returned immediately without a new
+                // updateFile event. Consume the response too, otherwise avatars
+                // remain blank after a process restart despite existing on disk.
+                val file = client.request("downloadFile", JSONObject().put("file_id", fileId).put("priority", priority).put("offset", 0).put("limit", 0).put("synchronous", false))
+                if (file.optString("@type") == "file") publishFile(file)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                requestedDownloads.remove(fileId)
+                if (isAvatarFile(fileId)) scheduleAvatarRetry(fileId)
+            }
+        }
         // TDLib normally emits updateFile, but also release the guard if the client is
         // disconnected before that update can arrive. A later map/update can retry safely.
         repositoryScope.launch {
@@ -1131,8 +1469,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private fun maybeAutoSaveMedia(message: MessageSummary) {
         if (!_settings.value.saveToGallery) return
         val mediaType = message.mediaType?.takeIf { it == MediaType.PHOTO || it == MediaType.VIDEO } ?: return
-        val fileId = message.mediaFileId ?: return
-        saveMediaToGallery(fileId, mediaType, message.mediaName, message.mediaPath)
+        val fileId = message.mediaFullFileId ?: message.mediaFileId ?: return
+        saveMediaToGallery(fileId, mediaType, message.mediaName, message.mediaFullPath ?: message.mediaPath)
     }
 
     private fun saveLocalFileToMediaStore(fileId: Int, path: String, request: GallerySaveRequest) {
@@ -1177,6 +1515,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private data class HistoryCursor(
         var oldestMessageId: Long = 0L,
         var hasMore: Boolean = true,
+        var serverHasMore: Boolean = true,
+        var hasRetainedOlder: Boolean = false,
         var initialLoaded: Boolean = false,
         var loading: Boolean = false,
     )
@@ -1191,11 +1531,13 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val cursor = historyCursors.computeIfAbsent(chatId) { HistoryCursor() }
         synchronized(cursor) {
             if (cursor.loading) return null
-            if (!initial && (!cursor.initialLoaded || !cursor.hasMore || cursor.oldestMessageId <= 0L)) return null
+            if (!initial && (!cursor.initialLoaded || (!cursor.serverHasMore && !cursor.hasRetainedOlder))) return null
             cursor.loading = true
             if (initial) {
                 cursor.oldestMessageId = 0L
                 cursor.hasMore = true
+                cursor.serverHasMore = true
+                cursor.hasRetainedOlder = false
                 cursor.initialLoaded = false
             }
         }
@@ -1206,16 +1548,17 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         synchronized(cursor) { cursor.loading = false }
     }
 
-    private fun updateHistoryCursor(cursor: HistoryCursor, batch: HistoryBatch, initial: Boolean) {
+    private fun updateHistoryCursor(
+        cursor: HistoryCursor,
+        batch: HistoryBatch,
+        initial: Boolean,
+        hasRetainedOlder: Boolean,
+    ) {
         synchronized(cursor) {
-            if (batch.oldestMessageId > 0L) {
-                cursor.oldestMessageId = if (initial || cursor.oldestMessageId <= 0L) {
-                    batch.oldestMessageId
-                } else {
-                    minOf(cursor.oldestMessageId, batch.oldestMessageId)
-                }
-            }
-            cursor.hasMore = batch.hasMore
+            if (batch.oldestMessageId != 0L) cursor.oldestMessageId = batch.oldestMessageId
+            cursor.serverHasMore = batch.hasMore
+            cursor.hasRetainedOlder = hasRetainedOlder
+            cursor.hasMore = batch.hasMore || hasRetainedOlder
             if (initial) cursor.initialLoaded = true
         }
     }
@@ -1225,18 +1568,15 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         channelPost: Boolean,
         limit: Int,
         initialFromMessageId: Long,
-        initial: Boolean,
-    ): HistoryBatch {
-        val pageLimit = limit.coerceIn(1, 100)
-        val requestedCount = limit.coerceAtLeast(1)
-        val loaded = mutableListOf<MessageSummary>()
-        var fromMessageId = initialFromMessageId
-        var oldestMessageId = 0L
-        var pageCount = 0
-        var retriedInitialHistory = false
-        var hasMore = true
-        while (loaded.size < requestedCount && pageCount < MAX_HISTORY_PAGES) {
-            val result = client?.request(
+    ): HistoryBatch = withContext(Dispatchers.Default) {
+        val result = paginateHistory(
+            initialFromMessageId = initialFromMessageId,
+            requestedCount = limit,
+            pageLimit = limit,
+            maxPages = MAX_HISTORY_PAGES,
+            idOf = MessageSummary::id,
+        ) { fromMessageId, pageLimit ->
+            val response = client?.request(
                 "getChatHistory",
                 JSONObject()
                     .put("chat_id", chatId)
@@ -1244,37 +1584,16 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                     .put("offset", 0)
                     .put("limit", pageLimit)
                     .put("only_local", false),
-            ) ?: break
-            val messages = result.optJSONArray("messages")
-            if (messages == null || messages.length() == 0) {
-                hasMore = false
-                break
-            }
-
-            val pageIds = (0 until messages.length())
-                .mapNotNull { index -> messages.optJSONObject(index)?.optLong("id")?.takeIf { it > 0L } }
-            val pageOldestMessageId = pageIds.minOrNull() ?: 0L
-            if (pageOldestMessageId > 0L) {
-                oldestMessageId = if (oldestMessageId == 0L) pageOldestMessageId else minOf(oldestMessageId, pageOldestMessageId)
-            }
-            loaded += messages.toMessageList(chatId, channelPost)
-            pageCount += 1
-
-            // A channel or group may answer the first request with a short page
-            // while TDLib is filling its local database. Repeat that exact
-            // request once before advancing the cursor.
-            if (initial && fromMessageId == 0L && !retriedInitialHistory && messages.length() < pageLimit && pageOldestMessageId > 0L) {
-                retriedInitialHistory = true
-                continue
-            }
-            if (pageOldestMessageId <= 0L || pageOldestMessageId == fromMessageId) {
-                hasMore = false
-                break
-            }
-            fromMessageId = pageOldestMessageId
+            ) ?: return@paginateHistory HistoryPage(emptyList(), 0L)
+            val messages = response.optJSONArray("messages") ?: return@paginateHistory HistoryPage(emptyList(), 0L)
+            val rawMessages = (0 until messages.length()).mapNotNull(messages::optJSONObject)
+            // TDLib returns reverse chronological pages. Its documented cursor
+            // is the last message ID in the response, which may be negative for
+            // a local message that has not received a server ID yet.
+            val oldestMessageId = rawMessages.lastOrNull()?.optLong("id") ?: 0L
+            HistoryPage(rawMessages.mapNotNull { mapMessage(it, chatId, channelPost) }, oldestMessageId)
         }
-        if (pageCount >= MAX_HISTORY_PAGES && oldestMessageId > 0L) hasMore = true
-        return HistoryBatch(loaded, oldestMessageId, hasMore)
+        HistoryBatch(result.messages, result.oldestMessageId, result.hasMore)
     }
 
     private fun JSONArray?.toMessageList(chatId: Long, channelPost: Boolean): List<MessageSummary> =
@@ -1284,7 +1603,36 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         if (this == null) emptyList() else (0 until length()).mapNotNull { mapMessage(optJSONObject(it) ?: JSONObject()) }
 
     private fun mergeMessages(existing: List<MessageSummary>, incoming: List<MessageSummary>): List<MessageSummary> =
-        (existing + incoming).filter { it.id != 0L }.associateBy { it.id }.values.sortedBy { it.id }
+        mergeChronologicalMessages(existing, incoming)
+
+    private suspend fun persistRetentionEvents(events: List<RetentionEvent>) {
+        val pendingMessages = mutableListOf<MessageSummary>()
+        suspend fun flushMessages() {
+            if (pendingMessages.isEmpty()) return
+            messageRetentionStore.saveAll(pendingMessages.toList())
+            pendingMessages.clear()
+        }
+        events.forEach { event ->
+            when (event) {
+                is RetentionEvent.Save -> pendingMessages += event.message
+                is RetentionEvent.Deleted -> {
+                    flushMessages()
+                    messageRetentionStore.markDeleted(event.chatId, event.messageIds)
+                }
+                RetentionEvent.Clear -> {
+                    flushMessages()
+                    messageRetentionStore.clear()
+                }
+            }
+        }
+        flushMessages()
+    }
+
+    private sealed interface RetentionEvent {
+        data class Save(val message: MessageSummary) : RetentionEvent
+        data class Deleted(val chatId: Long, val messageIds: Set<Long>) : RetentionEvent
+        data object Clear : RetentionEvent
+    }
 
     private fun JSONObject.isChannelChat(): Boolean =
         optJSONObject("type")?.let { type ->
@@ -1347,11 +1695,14 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         const val FOLDER_CHATS_PREFIX = "folder_chats."
         const val AUTH_ACTION_TIMEOUT_MS = 15_000L
         const val SESSION_RESTORE_TIMEOUT_MS = 60_000L
+        const val ACCOUNT_REMOVAL_LOGOUT_TIMEOUT_MS = 5_000L
         const val RETENTION_WRITE_BATCH_DELAY_MS = 180L
+        const val RETAINED_INITIAL_PAGE_SIZE = 100
         const val FILE_REQUEST_GUARD_MS = 15_000L
         const val AVATAR_RETRY_DELAY_MS = 600L
         const val MAX_AVATAR_RETRIES = 3
         const val MAX_HISTORY_PAGES = 8
+        const val CHAT_PUBLICATION_COALESCE_MS = 16L
         const val ACTIVITY_WINDOW_SECONDS = 24 * 60 * 60L
         const val MAX_ACTIVITY_PAGES = 200
         val NON_ACTIVITY_MESSAGE_TYPES = setOf(

@@ -247,10 +247,14 @@ fun AuthScreen(state: AuthState, viewModel: ChatwaveViewModel, accountManager: T
                             is AuthState.Error -> {
                                 Text(state.message, color = MaterialTheme.colorScheme.error)
                                 Text(
-                                    "Your saved Telegram session has not been removed. Restart the app to try restoring it again.",
+                                    "Your saved Telegram session has not been removed. Check your connection and retry.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(top = 8.dp),
                                 )
+                                TextButton(
+                                    onClick = viewModel::retrySessionRestore,
+                                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                ) { Text("Retry session restore") }
                             }
                             AuthState.Ready -> Unit
                         }

@@ -4,13 +4,14 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import com.example.tgclient.BuildConfig
 import java.io.File
 import java.security.KeyStore
+import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import kotlin.random.Random
 
 /** Keeps TDLib's database key encrypted by a device-bound Android Keystore key. */
 class DatabaseKeyStore(context: Context, accountId: String = DEFAULT_ACCOUNT_ID) {
@@ -51,7 +52,7 @@ class DatabaseKeyStore(context: Context, accountId: String = DEFAULT_ACCOUNT_ID)
             throw IllegalStateException("Unable to recover the TDLib database key", error)
         }
 
-        val databaseKey = Random.nextBytes(32)
+        val databaseKey = ByteArray(DATABASE_KEY_BYTES).also(SecureRandom()::nextBytes)
         persist(databaseKey)
         return databaseKey
     }
@@ -130,12 +131,16 @@ class DatabaseKeyStore(context: Context, accountId: String = DEFAULT_ACCOUNT_ID)
         const val TRANSFORMATION = "AES/GCM/NoPadding"
         const val GCM_IV_BYTES = 12
         const val GCM_TAG_BITS = 128
+        const val DATABASE_KEY_BYTES = 32
         const val DATABASE_KEY_FILE = ".database-key"
 
-        fun accountRoot(context: Context, accountId: String): File = if (accountId == DEFAULT_ACCOUNT_ID) {
-            File(context.noBackupFilesDir, "tdlib")
-        } else {
-            File(context.noBackupFilesDir, "tdlib/accounts/$accountId")
+        fun accountRoot(context: Context, accountId: String): File {
+            val root = if (BuildConfig.TELEGRAM_USE_TEST_DC) "tdlib-test" else "tdlib"
+            return if (accountId == DEFAULT_ACCOUNT_ID) {
+                File(context.noBackupFilesDir, root)
+            } else {
+                File(context.noBackupFilesDir, "$root/accounts/$accountId")
+            }
         }
     }
 }

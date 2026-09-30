@@ -20,6 +20,9 @@ val releaseStoreFile = secret("release.storeFile")
 val releaseStorePassword = secret("release.storePassword")
 val releaseKeyAlias = secret("release.keyAlias")
 val releaseKeyPassword = secret("release.keyPassword")
+val releaseKeystore = releaseStoreFile.takeIf(String::isNotBlank)?.let(rootProject::file)
+val releaseSigningReady = listOf(releaseStorePassword, releaseKeyAlias, releaseKeyPassword).all(String::isNotBlank) &&
+    releaseKeystore?.isFile == true
 
 android {
     namespace = "com.example.tgclient"
@@ -27,23 +30,15 @@ android {
 
     signingConfigs {
         create("release") {
-            val missing = listOf(
-                "release.storeFile" to releaseStoreFile,
-                "release.storePassword" to releaseStorePassword,
-                "release.keyAlias" to releaseKeyAlias,
-                "release.keyPassword" to releaseKeyPassword,
-            ).filter { it.second.isBlank() }.map { it.first }
-            if (missing.isNotEmpty()) {
-                throw GradleException("Release signing is required. Missing: ${missing.joinToString()}")
+            // Debug builds and unit tests must not depend on a release signing
+            // file. Release packaging below performs a strict validation so a
+            // release APK can never silently become unsigned.
+            if (releaseSigningReady) {
+                storeFile = requireNotNull(releaseKeystore)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
-            val keystore = rootProject.file(releaseStoreFile)
-            if (!keystore.isFile) {
-                throw GradleException("Release keystore does not exist: ${keystore.absolutePath}")
-            }
-            storeFile = keystore
-            storePassword = releaseStorePassword
-            keyAlias = releaseKeyAlias
-            keyPassword = releaseKeyPassword
         }
     }
 
@@ -51,6 +46,7 @@ android {
         applicationId = "com.example.tgclient"
         minSdk = 29
         targetSdk = 35
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = 17
         versionName = "0.1.16"
 
@@ -62,6 +58,8 @@ android {
 
     buildTypes {
         release {
+            // Production APKs must never be pointed at Telegram's disposable test DCs.
+            buildConfigField("boolean", "TELEGRAM_USE_TEST_DC", "false")
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("release")
@@ -71,6 +69,9 @@ android {
             )
         }
         debug {
+            // Enable only for explicit QA runs: ./gradlew ... -Ptelegram.useTestDc=true
+            val useTestDc = providers.gradleProperty("telegram.useTestDc").orNull.equals("true", ignoreCase = true)
+            buildConfigField("boolean", "TELEGRAM_USE_TEST_DC", useTestDc.toString())
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
         }
@@ -106,6 +107,24 @@ android {
     }
 }
 
+tasks.configureEach {
+    if (name == "packageRelease" || name == "signReleaseBundle") {
+        if (!releaseSigningReady) {
+            // A stale APK from a previous signed build must not make an
+            // unconfigured release assemble appear successful.
+            outputs.upToDateWhen { false }
+        }
+        doFirst {
+            if (!releaseSigningReady) {
+                throw GradleException(
+                    "Release signing is required. Check release.storeFile, release.storePassword, " +
+                        "release.keyAlias, and release.keyPassword in local.properties or CI secrets.",
+                )
+            }
+        }
+    }
+}
+
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.activity:activity-compose:1.9.3")
@@ -113,13 +132,9 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-    implementation("androidx.navigation:navigation-compose:2.8.5")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.15.0")
-    implementation("androidx.core:core:1.15.0")
-    implementation("androidx.datastore:datastore-preferences:1.1.1")
-    implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     // TDLib's native Android artifact and Kotlin coroutine helpers.
@@ -129,8 +144,9 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("androidx.arch.core:core-testing:2.2.0")
-    androidTestImplementation(platform("androidx.compose:compose-bom:2024.12.01"))
-    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
-    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

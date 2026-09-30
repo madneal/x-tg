@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.tgclient.data.TelegramRepository
 import com.example.tgclient.model.AuthState
 import com.example.tgclient.model.MessageEntity
+import com.example.tgclient.model.MessageSummary
 import com.example.tgclient.model.MediaType
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -16,7 +17,9 @@ import kotlinx.coroutines.launch
 class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel() {
     val authState = repository.authState
     val chats = repository.chats
+    val chatListLoadState = repository.chatListLoadState
     val messages = repository.messages
+    val chatHistory = repository.chatHistory
     val users = repository.users
     val settings = repository.settings
     val chatFolders = repository.chatFolders
@@ -26,6 +29,8 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     val authError = repository.authError
     val operationError = repository.operationError
     val groupActivity = repository.groupActivity
+    val transfers = repository.transfers
+    val connectionStatus = repository.connectionStatus
 
     val ready: StateFlow<Boolean> = authState
         .combine(repository.chats) { auth, _ -> auth is AuthState.Ready }
@@ -51,12 +56,15 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun submitPassword(password: String) = repository.submitPassword(password)
     fun register(firstName: String, lastName: String) = repository.register(firstName, lastName)
     fun logout() = repository.logout()
+    fun retrySessionRestore() = repository.retrySessionRestore()
+    fun clearOperationError() = repository.clearOperationError()
     fun openChat(chatId: Long) = viewModelScope.launch { repository.loadMessages(chatId) }
     fun resolveChatTarget(target: String, onResolved: (Long) -> Unit, onFailed: () -> Unit = {}) = viewModelScope.launch {
         val chatId = repository.resolveChatTarget(target)
         if (chatId != null) onResolved(chatId) else onFailed()
     }
     fun loadOlderMessages(chatId: Long) = viewModelScope.launch { repository.loadOlderMessages(chatId) }
+    fun loadMoreChats() = viewModelScope.launch { repository.loadChats() }
     fun closeChat(chatId: Long) = repository.closeChat(chatId)
     fun loadGroupActivityStats(chatId: Long) = viewModelScope.launch { repository.loadGroupActivityStats(chatId) }
     fun sendMessage(chatId: Long, text: String) = repository.sendText(chatId, text)
@@ -70,7 +78,9 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     fun toggleMessageReaction(chatId: Long, messageId: Long) = repository.toggleMessageReaction(chatId, messageId)
     fun sendLocalMedia(chatId: Long, path: String, mimeType: String, caption: String = "", replyToMessageId: Long? = null) =
         repository.sendLocalMedia(chatId, path, mimeType, caption = caption, replyToMessageId = replyToMessageId)
+    fun retryMessage(chatId: Long, message: MessageSummary) = repository.retryMessage(chatId, message)
     fun downloadFile(fileId: Int) = repository.downloadFile(fileId)
+    fun cancelDownload(fileId: Int) = repository.cancelDownload(fileId)
     fun saveMediaToGallery(fileId: Int, mediaType: MediaType, fileName: String? = null, localPath: String? = null) =
         repository.saveMediaToGallery(fileId, mediaType, fileName, localPath)
     fun createChatFolder(title: String) = repository.createChatFolder(title)

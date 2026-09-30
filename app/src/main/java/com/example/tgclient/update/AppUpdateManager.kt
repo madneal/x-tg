@@ -1,9 +1,9 @@
 package com.example.tgclient.update
 
+import android.os.Build
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.example.tgclient.BuildConfig
@@ -92,7 +92,7 @@ class AppUpdateManager(context: Context, private val scope: CoroutineScope) {
             _state.value = UpdateState.Error("Downloaded update is no longer available")
             return
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
+        if (!context.packageManager.canRequestPackageInstalls()) {
             val permissionIntent = Intent(
                 Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                 Uri.parse("package:${context.packageName}"),

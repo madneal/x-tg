@@ -13,7 +13,7 @@ data class FeatureCapability(
 object FeatureRegistry {
     val capabilities = listOf(
         FeatureCapability("auth", "Phone, email, code, password login", FeatureStatus.IMPLEMENTED, "authorizationState"),
-        FeatureCapability("chat_list", "Chat lists, folders, pinned and unread state", FeatureStatus.IMPLEMENTED, "getChats/updateChat"),
+        FeatureCapability("chat_list", "Chat lists, folders, pinned and unread state", FeatureStatus.IMPLEMENTED, "loadChats/updateChatPosition"),
         FeatureCapability("text_messages", "Text, replies, edits, deletion and forwarding", FeatureStatus.IMPLEMENTED, "sendMessage/updateMessage"),
         FeatureCapability("media", "Photo, video, document, audio and voice transfer", FeatureStatus.PARTIAL, "inputMessage* / updateFile"),
         FeatureCapability("search", "Global and chat message search", FeatureStatus.PARTIAL, "searchChatMessages/searchMessages"),

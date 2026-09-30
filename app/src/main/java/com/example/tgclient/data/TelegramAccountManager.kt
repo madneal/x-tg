@@ -1,6 +1,7 @@
 package com.example.tgclient.data
 
 import android.content.Context
+import com.example.tgclient.BuildConfig
 import com.example.tgclient.model.AccountSummary
 import com.example.tgclient.security.DatabaseKeyStore
 import kotlinx.coroutines.CoroutineScope
@@ -25,7 +26,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
     private val accountLabels = accountIds.associateWith { id -> preferences.getString("label.$id", null) }.toMutableMap()
     private val _accounts = MutableStateFlow(accountIds.mapIndexed(::accountSummary))
     private val _activeAccountId = MutableStateFlow(
-        preferences.getString(ACTIVE_ACCOUNT, DEFAULT_ACCOUNT_ID)?.takeIf { it in accountIds } ?: DEFAULT_ACCOUNT_ID,
+        preferences.getString(ACTIVE_ACCOUNT, DEFAULT_ACCOUNT_ID)?.takeIf { it in accountIds } ?: accountIds.first(),
     )
 
     val accounts: StateFlow<List<AccountSummary>> = _accounts.asStateFlow()
@@ -51,18 +52,21 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
     @Synchronized
     fun switchAccount(accountId: String) {
         if (accountId !in accountIds) return
-        val previousAccountId = _activeAccountId.value
-        if (previousAccountId != accountId) {
-            repositories.remove(previousAccountId)?.close()
-            accountObservers.remove(previousAccountId)?.cancel()
-        }
+        // Keep each account's TDLib client alive for the lifetime of the process.
+        // Closing and recreating it on every switch can leave TDLib in Loading while
+        // the same on-disk database is reopened, and makes account switching look
+        // like a fresh login. The repository is already isolated by accountId.
         repository(accountId)
         _activeAccountId.value = accountId
-        preferences.edit().putString(ACTIVE_ACCOUNT, accountId).commit()
+        preferences.edit().putString(ACTIVE_ACCOUNT, accountId).apply()
     }
 
     @Synchronized
+    fun canAddAccount(): Boolean = accountIds.size < MAX_ACCOUNT_COUNT
+
+    @Synchronized
     fun createAccount(): String {
+        check(canAddAccount()) { "The maximum number of Telegram accounts is $MAX_ACCOUNT_COUNT." }
         val id = "account_" + UUID.randomUUID().toString().replace("-", "").take(12)
         accountIds += id
         persistAccountIds()
@@ -81,7 +85,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
         accountObservers.remove(accountId)?.cancel()
         accountIds.remove(accountId)
         accountLabels.remove(accountId)
-        preferences.edit().remove("label.$accountId").commit()
+        preferences.edit().remove("label.$accountId").apply()
         persistAccountIds()
         _accounts.value = accountIds.mapIndexed(::accountSummary)
 
@@ -89,24 +93,23 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
             val replacement = accountIds.first()
             repository(replacement)
             _activeAccountId.value = replacement
-            preferences.edit().putString(ACTIVE_ACCOUNT, replacement).commit()
+            preferences.edit().putString(ACTIVE_ACCOUNT, replacement).apply()
         }
 
         scope.launch(Dispatchers.IO) {
-            repository?.removeFromDevice()
-            clearAccountStorage(accountId)
+            try {
+                repository?.removeFromDevice()
+            } finally {
+                clearAccountStorage(accountId)
+            }
         }
         return true
     }
 
     private fun clearAccountStorage(accountId: String) {
         DatabaseKeyStore(appContext, accountId).clear()
-        val accountRoot = if (accountId == DEFAULT_ACCOUNT_ID) {
-            File(appContext.noBackupFilesDir, "tdlib")
-        } else {
-            File(appContext.noBackupFilesDir, "tdlib/accounts/$accountId")
-        }
-        accountRoot.deleteRecursively()
+        val databaseRoot = if (BuildConfig.TELEGRAM_USE_TEST_DC) "tdlib-test" else "tdlib"
+        deleteAccountDirectory(File(appContext.noBackupFilesDir, databaseRoot), accountId)
     }
 
     private fun accountSummary(index: Int, id: String): AccountSummary =
@@ -119,7 +122,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
             ?: return
         if (accountLabels[accountId] == label) return
         accountLabels[accountId] = label
-        preferences.edit().putString("label.$accountId", label).commit()
+        preferences.edit().putString("label.$accountId", label).apply()
         _accounts.value = accountIds.mapIndexed(::accountSummary)
     }
 
@@ -140,5 +143,6 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
         const val PREFERENCES = "telegram_accounts"
         const val ACCOUNT_IDS = "account_ids"
         const val ACTIVE_ACCOUNT = "active_account"
+        const val MAX_ACCOUNT_COUNT = 4
     }
 }

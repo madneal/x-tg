@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,6 +34,7 @@ import androidx.compose.material3.Badge
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -51,11 +53,12 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -70,6 +73,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.tgclient.model.ChatFolder
 import com.example.tgclient.model.ChatSummary
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -79,6 +83,7 @@ import java.util.Locale
 @Composable
 fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, onChatClick: (Long) -> Unit) {
     val chats by viewModel.chats.collectAsStateWithLifecycle()
+    val chatListLoadState by viewModel.chatListLoadState.collectAsStateWithLifecycle()
     val folders by viewModel.chatFolders.collectAsStateWithLifecycle()
     val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
     var searchVisible by remember { mutableStateOf(false) }
@@ -98,6 +103,18 @@ fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, on
         if (searchQuery.isBlank()) folderChats else folderChats.filter {
             it.title.contains(searchQuery, ignoreCase = true) || it.subtitle.contains(searchQuery, ignoreCase = true)
         }
+    }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(listState, selectedFolder?.id, searchQuery, filteredChats.size) {
+        if (selectedFolder?.isAllChats != true || searchQuery.isNotBlank()) return@LaunchedEffect
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+            .distinctUntilChanged()
+            .collect { lastVisibleIndex ->
+                if (filteredChats.isNotEmpty() && lastVisibleIndex >= filteredChats.lastIndex - 8) {
+                    viewModel.loadMoreChats()
+                }
+            }
     }
 
     Scaffold(
@@ -166,8 +183,14 @@ fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, on
                 ) {
                     Avatar(title = "Chatwave", size = 72.dp)
                     Spacer(Modifier.size(16.dp))
+                    if (chats.isEmpty() && chatListLoadState.isLoading) {
+                        CircularProgressIndicator()
+                        Spacer(Modifier.size(12.dp))
+                    }
                     Text(
                         when {
+                            chats.isEmpty() && chatListLoadState.isLoading -> "Loading your chats…"
+                            chats.isEmpty() && chatListLoadState.error != null -> "Couldn't load your chats"
                             chats.isEmpty() -> "Your chats will appear here"
                             folderChats.isEmpty() && selectedFolder?.isAllChats == false -> "No chats in this folder"
                             else -> "No chats found"
@@ -175,16 +198,23 @@ fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, on
                         style = MaterialTheme.typography.titleMedium,
                     )
                     Text(
-                        if (folderChats.isEmpty() && selectedFolder?.isAllChats == false) {
+                        if (chats.isEmpty() && chatListLoadState.isLoading) {
+                            "Connecting to Telegram…"
+                        } else if (chats.isEmpty() && chatListLoadState.error != null) {
+                            chatListLoadState.error.orEmpty()
+                        } else if (folderChats.isEmpty() && selectedFolder?.isAllChats == false) {
                             "Use the chat menu to add conversations to this folder"
                         } else {
                             "Start a conversation to see it here"
                         },
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (chats.isEmpty() && chatListLoadState.error != null) {
+                        TextButton(onClick = viewModel::loadMoreChats) { Text("Retry") }
+                    }
                 }
             } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
+                LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                     items(filteredChats, key = { it.id }) { chat ->
                         val labels = folders.filter { !it.isAllChats && chat.id in it.chatIds }
                         ChatRow(chat, labels, onChatClick) { chatForLabels = chat }
@@ -410,8 +440,9 @@ fun Avatar(title: String, size: Dp = 54.dp, photoPath: String? = null, photoRevi
 
 @Composable
 fun rememberDecodedBitmap(path: String?, maxDimension: Int, revision: Long = 0L): android.graphics.Bitmap? {
-    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, path, maxDimension, revision) {
-        value = withContext(Dispatchers.IO) {
+    var bitmap by remember(path, maxDimension, revision) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(path, maxDimension, revision) {
+        bitmap = withContext(Dispatchers.IO) {
             // TDLib can publish the path just before the filesystem finishes moving the
             // file into place. Retry briefly so a transient decode failure never leaves a
             // permanent initials placeholder until the next chat refresh.

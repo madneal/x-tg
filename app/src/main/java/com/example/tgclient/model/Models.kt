@@ -59,6 +59,21 @@ data class ChatFolder(
     val isAllChats: Boolean = false,
 )
 
+data class ChatHistoryState(
+    val isLoadingInitial: Boolean = false,
+    val isLoadingOlder: Boolean = false,
+    val hasLoadedInitial: Boolean = false,
+    val hasOlderMessages: Boolean = true,
+    val initialLoadError: String? = null,
+    val olderLoadError: String? = null,
+)
+
+data class ChatListLoadState(
+    val isLoading: Boolean = false,
+    val allChatsLoaded: Boolean = false,
+    val error: String? = null,
+)
+
 data class MessageSummary(
     val id: Long,
     val chatId: Long,
@@ -72,6 +87,8 @@ data class MessageSummary(
     val isChannelPost: Boolean = false,
     val mediaFileId: Int? = null,
     val mediaPath: String? = null,
+    val mediaFullFileId: Int? = null,
+    val mediaFullPath: String? = null,
     val mediaName: String? = null,
     val entities: List<MessageEntity> = emptyList(),
     val replyToMessageId: Long? = null,
@@ -80,7 +97,22 @@ data class MessageSummary(
     val canForward: Boolean = true,
     val isPinned: Boolean = false,
     val isDeleted: Boolean = false,
+    val sendState: MessageSendState? = null,
+    val sendError: String? = null,
+    val canRetrySend: Boolean = false,
+    val retrySendAtEpochSeconds: Int = 0,
 )
+
+enum class MessageSendState { SENDING, FAILED }
+
+enum class TdConnectionStatus {
+    UNKNOWN,
+    WAITING_FOR_NETWORK,
+    CONNECTING_TO_PROXY,
+    CONNECTING,
+    UPDATING,
+    READY,
+}
 
 /** A TDLib text entity, kept separate from TDLib JSON for immutable UI state. */
 data class MessageEntity(
@@ -127,6 +159,8 @@ data class TransferState(
     val fileId: Int,
     val downloadedBytes: Long,
     val totalBytes: Long,
+    val isActive: Boolean = false,
+    val isUploading: Boolean = false,
     val isCompleted: Boolean = false,
     val error: String? = null,
 )

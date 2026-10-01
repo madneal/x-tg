@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -121,12 +122,14 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val chatHistory by viewModel.chatHistory.collectAsStateWithLifecycle()
     val chats by viewModel.chats.collectAsStateWithLifecycle()
+    val openedChats by viewModel.openedChats.collectAsStateWithLifecycle()
     val users by viewModel.users.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val groupActivity by viewModel.groupActivity.collectAsStateWithLifecycle()
     val transfers by viewModel.transfers.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var draft by remember { mutableStateOf(TextFieldValue()) }
+    var profileUserId by remember(chatId) { mutableStateOf<Long?>(null) }
     var showChatMenu by remember { mutableStateOf(false) }
     var showActivityDialog by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
@@ -156,7 +159,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
             chatMessages.isNotEmpty() && lastVisibleIndex < chatMessages.lastIndex
         }
     }
-    val chat = chats.firstOrNull { it.id == chatId }
+    val chat = chats.firstOrNull { it.id == chatId } ?: openedChats[chatId]
     val title = chat?.title ?: "Chat"
     val chatTypeLabel = when {
         chat?.isChannel == true -> "Channel"
@@ -207,7 +210,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
         topBar = {
             TopAppBar(
                 title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(modifier = Modifier.clickable(enabled = chat?.userId != null) { profileUserId = chat?.userId }, verticalAlignment = Alignment.CenterVertically) {
                         Avatar(title, size = 38.dp, photoPath = chat?.photoPath, photoRevision = chat?.photoRevision ?: 0L)
                         Spacer(Modifier.size(10.dp))
                         Column {
@@ -412,6 +415,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                                 mergeWithNext = false,
                                 showSenderAvatar = chat?.isGroup == true,
                                 senderAvatarPath = message.senderUserId?.let { users[it]?.avatarPath },
+                                onOpenProfile = { profileUserId = it },
                                 senderAvatarRevision = message.senderUserId?.let { users[it]?.avatarRevision } ?: 0L,
                                 transfers = transfers,
                                 onOpenLink = { target ->
@@ -463,6 +467,13 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                 }
             }
         }
+    }
+
+    profileUserId?.let { userId ->
+        UserProfileDialog(userId, viewModel, onDismiss = { profileUserId = null }, onOpenChat = {
+            profileUserId = null
+            onOpenChat(it)
+        })
     }
 
     if (confirmClearHistory) {
@@ -785,6 +796,7 @@ private fun MessageBubble(
     showSenderAvatar: Boolean,
     senderAvatarPath: String?,
     senderAvatarRevision: Long,
+    onOpenProfile: (Long) -> Unit,
     transfers: Map<Int, TransferState>,
     onOpenLink: (String) -> Unit,
     onDownloadFile: (Int) -> Unit,
@@ -815,7 +827,9 @@ private fun MessageBubble(
         verticalAlignment = Alignment.Bottom,
     ) {
         if (!outgoing && showSenderAvatar) {
-            Avatar(message.senderName, size = 32.dp, photoPath = senderAvatarPath, photoRevision = senderAvatarRevision)
+            Box(Modifier.clickable(enabled = message.senderUserId != null) { message.senderUserId?.let(onOpenProfile) }) {
+                Avatar(message.senderName, size = 32.dp, photoPath = senderAvatarPath, photoRevision = senderAvatarRevision)
+            }
             Spacer(Modifier.size(6.dp))
         }
         Column(
@@ -829,7 +843,7 @@ private fun MessageBubble(
                 .padding(horizontal = 11.dp, vertical = 7.dp),
             horizontalAlignment = if (outgoing) Alignment.End else Alignment.Start,
         ) {
-            if (!outgoing && !mergeWithPrevious) Text(message.senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+            if (!outgoing && !mergeWithPrevious) Text(message.senderName, modifier = Modifier.clickable(enabled = message.senderUserId != null) { message.senderUserId?.let(onOpenProfile) }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
             if (message.isDeleted) {
                 Text("Deleted message · kept locally", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 3.dp))
             }

@@ -13,6 +13,8 @@ data class TelegramUser(
     val lastName: String = "",
 )
 
+data class UserProfile(val user: TelegramUser, val bio: String, val personalChatId: Long?)
+
 data class AccountSummary(
     val id: String,
     val label: String,
@@ -45,6 +47,7 @@ data class ChatSummary(
     val isChannel: Boolean = false,
     val isGroup: Boolean = false,
     val isPrivate: Boolean = false,
+    val userId: Long? = null,
     val lastMessage: MessageSummary? = null,
     val photoPath: String? = null,
     /** Changes whenever the local chat photo file is replaced, so Compose can invalidate its bitmap cache. */

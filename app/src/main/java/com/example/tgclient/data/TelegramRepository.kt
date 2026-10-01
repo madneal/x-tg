@@ -61,6 +61,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val notificationController = TelegramNotificationController(context, accountId)
     private val messageRetentionStore = MessageRetentionStore(context, accountId)
     private val _authState = MutableStateFlow<AuthState>(AuthState.Loading)
+    private val _openedChats = MutableStateFlow<Map<Long, ChatSummary>>(emptyMap())
+    val openedChats: StateFlow<Map<Long, ChatSummary>> = _openedChats.asStateFlow()
     private val _chats = MutableStateFlow<List<ChatSummary>>(emptyList())
     private val _chatListLoadState = MutableStateFlow(ChatListLoadState())
     private val _messages = MutableStateFlow<Map<Long, List<MessageSummary>>>(emptyMap())
@@ -248,6 +250,21 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
 
     fun clearOperationError() {
         _operationError.value = null
+    }
+
+    suspend fun loadUserProfile(userId: Long): com.example.tgclient.model.UserProfile {
+        val activeClient = checkNotNull(client) { "Telegram is unavailable" }
+        val user = mapUser(activeClient.request("getUser", JSONObject().put("user_id", userId)))
+        _users.update { it + (userId to user) }
+        val full = activeClient.request("getUserFullInfo", JSONObject().put("user_id", userId))
+        return mapUserProfile(user, full)
+    }
+
+    suspend fun createPrivateChat(userId: Long): Long {
+        val chat = checkNotNull(client).request("createPrivateChat", JSONObject().put("user_id", userId).put("force", false))
+        chatCache[chat.optLong("id")] = chat
+        publishChats()
+        return chat.getLong("id")
     }
 
     suspend fun updateProfile(firstName: String, lastName: String, username: String) {
@@ -471,6 +488,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             val chat = client?.request("getChat", JSONObject().put("chat_id", chatId))
             if (chat != null && chat.optLong("id") == chatId) {
                 chatCache[chatId] = chat
+                _openedChats.update { it + (chatId to mapChat(chat)) }
                 publishChats()
             }
             val isChannel = chat?.isChannelChat() ?: chatCache[chatId]?.isChannelChat() == true
@@ -970,6 +988,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     private fun publishChats() {
+        _openedChats.update { opened -> opened.mapValues { (id, previous) -> chatCache[id]?.let(::mapChat) ?: previous } }
+
         _chats.value = sortChatsByPosition(
             chats = chatCache.values,
             chatId = { it.optLong("id") },
@@ -1207,7 +1227,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val firstName = user.optString("first_name")
         val lastName = user.optString("last_name")
         val displayName = listOf(firstName, lastName).filter { it.isNotBlank() }.joinToString(" ")
-        val username = user.optString("username").ifBlank { null }
+        val username = activeUsername(user)
         val phone = user.optString("phone_number").ifBlank { null }
         val avatarFileId = user.optJSONObject("profile_photo")?.optJSONObject("small")?.optInt("id")?.takeIf { it > 0 }
         avatarFileId?.let { requestFile(it, respectAutoDownload = false) }
@@ -1239,6 +1259,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             isChannel = chat.isChannelChat(),
             isGroup = chat.isGroupChat(),
             isPrivate = chat.isPrivateChat(),
+            userId = chat.optJSONObject("type")?.optLong("user_id")?.takeIf { it > 0L },
             lastMessage = chat.optJSONObject("last_message")?.let { mapMessage(it, chat.optLong("id"), chat.isChannelChat()) },
             photoPath = photoPath,
             photoRevision = photoPath?.let(::fileRevision) ?: 0L,

@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel() {
     val authState = repository.authState
     val chats = repository.chats
+    val openedChats = repository.openedChats
     val chatListLoadState = repository.chatListLoadState
     val messages = repository.messages
     val chatHistory = repository.chatHistory
@@ -43,6 +44,10 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
             }
         }
     }
+
+    suspend fun loadUserProfile(userId: Long) = repository.loadUserProfile(userId)
+    suspend fun resolveProfileChannel(chatId: Long) = repository.resolveChatTarget(chatId.toString())
+    suspend fun createPrivateChat(userId: Long) = repository.createPrivateChat(userId)
 
     fun submitPhone(phone: String) = repository.submitPhoneNumber(phone)
     fun submitEmail(email: String) = repository.submitEmailAddress(email)

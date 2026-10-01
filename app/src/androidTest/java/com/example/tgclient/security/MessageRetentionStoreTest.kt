@@ -15,6 +15,41 @@ import java.util.UUID
 
 class MessageRetentionStoreTest {
     @Test
+    fun neverArchivesPendingOrFailedOutgoingMessages() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val store = MessageRetentionStore(context, "outgoing_${UUID.randomUUID()}")
+        val sent = MessageSummary(2097152L, -100L, "Me", text = "hello", isOutgoing = true)
+        try {
+            store.saveAll(listOf(
+                sent.copy(id = 1048577, sendState = com.example.tgclient.model.MessageSendState.SENDING),
+                sent.copy(id = 1048585, sendState = com.example.tgclient.model.MessageSendState.FAILED), sent,
+            ))
+            assertEquals(listOf(sent.id), store.loadChat(-100L).map { it.id })
+        } finally { store.clear() }
+    }
+
+    @Test
+    fun upgradeRemovesLegacySendingPlaceholderButKeepsRepeatedConfirmedMessages() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val accountId = "outgoing_migration_${UUID.randomUUID()}"
+        val store = MessageRetentionStore(context, accountId)
+        val archive = File(context.noBackupFilesDir, "retained-messages/$accountId.archive")
+        val records = JSONArray()
+        listOf(1048577L, 2097152L, 3145728L).forEach { id ->
+            records.put(JSONObject().put("id", id).put("chat_id", -100L).put("sender_name", "Me")
+                .put("text", "same text").put("date", 1700000000).put("is_outgoing", true))
+        }
+        try {
+            val encrypt = MessageRetentionStore::class.java.getDeclaredMethod("encryptRecord", JSONObject::class.java).apply { isAccessible = true }
+            archive.parentFile?.mkdirs()
+            archive.writeBytes(encrypt.invoke(store, JSONObject().put("messages", records)) as ByteArray)
+            assertEquals(listOf(2097152L, 3145728L), store.loadChat(-100L).map { it.id })
+            store.close()
+            assertEquals(listOf(2097152L, 3145728L), store.loadChat(-100L).map { it.id })
+        } finally { store.clear(); archive.delete() }
+    }
+
+    @Test
     fun migratesExistingEncryptedJsonArchiveWithoutLosingMessages() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val accountId = "migration_${UUID.randomUUID().toString().replace("-", "")}"

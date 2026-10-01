@@ -91,6 +91,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val savedGalleryFiles = ConcurrentHashMap.newKeySet<Int>()
     private val requestedUsers = ConcurrentHashMap.newKeySet<Long>()
     private val localPinOverrides = ConcurrentHashMap<Long, Boolean>()
+    private val outgoingReplacements = OutgoingMessageReplacements()
     private val historyCursors = ConcurrentHashMap<Long, HistoryCursor>()
     private val chatsLoadGuard = AtomicBoolean(false)
     private val allMainChatsLoaded = AtomicBoolean(false)
@@ -1058,6 +1059,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             retrySendAtEpochSeconds = 0,
         ) ?: return
         val oldMessageId = update.optLong("old_message_id", mapped.id)
+        outgoingReplacements.record(chatId, oldMessageId, mapped.id)
+        if (_settings.value.retainDeletedMessages && mapped.sendState == null) retainedMessageWrites.trySend(RetentionEvent.Save(mapped))
         _messages.updateTimeline(chatId) { current ->
             reconcileOutgoingMessage(current, oldMessageId, mapped, MessageSummary::id)
                 .let(::sortMessagesChronologically)
@@ -1081,6 +1084,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             retrySendAtEpochSeconds = if (retryAfter > 0) now + retryAfter else 0,
         ) ?: return
         val oldMessageId = update.optLong("old_message_id", mapped.id)
+        outgoingReplacements.record(chatId, oldMessageId, mapped.id)
+        if (_settings.value.retainDeletedMessages && mapped.sendState == null) retainedMessageWrites.trySend(RetentionEvent.Save(mapped))
         _messages.updateTimeline(chatId) { current ->
             reconcileOutgoingMessage(current, oldMessageId, mapped, MessageSummary::id)
                 .let(::sortMessagesChronologically)
@@ -1659,7 +1664,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         if (this == null) emptyList() else (0 until length()).mapNotNull { mapMessage(optJSONObject(it) ?: JSONObject()) }
 
     private fun mergeMessages(existing: List<MessageSummary>, incoming: List<MessageSummary>): List<MessageSummary> =
-        mergeChronologicalMessages(existing, incoming)
+        mergeChronologicalMessages(outgoingReplacements.filter(existing), outgoingReplacements.filter(incoming))
 
     private suspend fun persistRetentionEvents(events: List<RetentionEvent>) {
         val pendingMessages = mutableListOf<MessageSummary>()

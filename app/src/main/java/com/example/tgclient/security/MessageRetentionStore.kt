@@ -1,5 +1,7 @@
 package com.example.tgclient.security
 
+import com.example.tgclient.data.isUnconfirmedOutgoingMessage
+
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
@@ -32,7 +34,7 @@ class MessageRetentionStore(context: Context, accountId: String) {
 
     /** Upserts one batch in a single SQLite transaction; payloads are encrypted individually. */
     fun saveAll(messages: Iterable<MessageSummary>) = synchronized(lock) {
-        val values = messages.asSequence().filter { it.chatId != 0L && it.id > 0L }.toList()
+        val values = messages.asSequence().filter { it.chatId != 0L && it.id > 0L && !isUnconfirmedOutgoingMessage(it) }.toList()
         if (values.isEmpty()) return@synchronized
         val db = databaseLocked()
         val obsoleteFileIds = mutableSetOf<Int>()
@@ -154,8 +156,25 @@ class MessageRetentionStore(context: Context, accountId: String) {
         db.execSQL("CREATE INDEX IF NOT EXISTS messages_full_file ON messages(full_file_id)")
         db.execSQL("CREATE TABLE IF NOT EXISTS retention_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         migrateLegacyArchive(db)
+        removeLegacySendingPlaceholders(db)
         database = db
         return db
+    }
+
+    /** Remove only TDLib's unsent outgoing placeholders left by older versions. */
+    private fun removeLegacySendingPlaceholders(db: SQLiteDatabase) {
+        val obsolete = mutableListOf<Pair<Long, Long>>()
+        db.rawQuery("SELECT chat_id, message_id, payload FROM messages WHERE (message_id & 3) = 1", null).use { cursor ->
+            while (cursor.moveToNext()) {
+                val message = fromJson(decryptRecord(cursor.getBlob(2))) ?: continue
+                if (isUnconfirmedOutgoingMessage(message)) obsolete += cursor.getLong(0) to cursor.getLong(1)
+            }
+        }
+        db.beginTransaction()
+        try {
+            obsolete.forEach { (chatId, id) -> db.delete("messages", "chat_id = ? AND message_id = ?", arrayOf(chatId.toString(), id.toString())) }
+            db.setTransactionSuccessful()
+        } finally { db.endTransaction() }
     }
 
     /** One-time migration from the older single encrypted JSON archive. */

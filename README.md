@@ -54,3 +54,11 @@ does not mix chat history or credentials.
 
 TDLib and its generated API are licensed independently of this application.
 Review all third-party notices before distributing an APK.
+
+### Local scheduled messages
+
+New schedules run on this Android device using WorkManager, without Telegram Premium. In the composer choose Schedule, select a date/time, and optionally enable Repeat daily (24 hours). Scheduled messages lists device jobs and existing Telegram server schedules; either can be cancelled. Existing server schedules are not migrated or duplicated automatically.
+
+Tasks are bound to their originating account, persisted encrypted with its Keystore-wrapped key, and recovered after app/device restart. Attachments are copied into private durable storage until completion or cancellation. Logout or removal of the account cancels its local tasks. Daily repeats use a 24-hour interval; missed days are skipped rather than replayed in a burst. A successful send schedules the next occurrence. Keep the account logged in and allow background activity: Android battery restrictions, force-stop, and loss of connectivity can delay execution. Force-stopped apps must be reopened. This is not an exact-alarm service and schedules do not sync to other devices.
+
+A persisted claim prevents automatic duplicate attempts. If Telegram delivery cannot be confirmed (including interruption during sending), the task pauses with a visible warning. Check the chat before cancelling it and creating a replacement. Cancellation stops future attempts but cannot retract an already submitted message. Legacy server tasks require a connection to appear; device tasks remain available offline.

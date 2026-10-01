@@ -21,6 +21,9 @@ class TelegramApplication : Application() {
         appUpdateManager = AppUpdateManager(this, applicationScope)
         telegramAccountManager = TelegramAccountManager(this, applicationScope)
         applicationScope.launch(Dispatchers.IO) {
+            telegramAccountManager.accounts.value.forEach { account ->
+                runCatching { com.example.tgclient.data.LocalSchedules(this@TelegramApplication, account.id).restore() }
+            }
             val uploadCutoff = System.currentTimeMillis() - STALE_UPLOAD_RETENTION_MS
             cacheDir.listFiles()
                 .orEmpty()

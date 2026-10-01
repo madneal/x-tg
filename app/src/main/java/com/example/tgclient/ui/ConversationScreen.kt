@@ -481,7 +481,7 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     }
 
     if (showSchedule) {
-        ScheduleMessageDialog(onDismiss = { showSchedule = false }, isPremium = currentUser?.isPremium == true, onSchedule = { sendAt, repeatPeriod ->
+        ScheduleMessageDialog(onDismiss = { showSchedule = false }, onSchedule = { sendAt, repeatPeriod ->
             viewModel.scheduleMessage(chatId, draft.text, draft.annotatedString.toMessageEntities(), pendingMedia?.path, pendingMedia?.mimeType, replyTarget?.id, sendAt, repeatPeriod)
             draft = TextFieldValue()
             pendingMedia = null

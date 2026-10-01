@@ -80,6 +80,7 @@ class TelegramAccountManager(context: Context, private val scope: CoroutineScope
     @Synchronized
     fun removeAccount(accountId: String): Boolean {
         if (accountId !in accountIds || accountIds.size <= 1) return false
+        LocalSchedules(appContext, accountId).clear()
         val wasActive = _activeAccountId.value == accountId
         val repository = repositories.remove(accountId)
         accountObservers.remove(accountId)?.cancel()

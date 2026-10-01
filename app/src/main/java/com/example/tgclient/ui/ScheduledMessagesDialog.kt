@@ -19,7 +19,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 @Composable
-internal fun ScheduleMessageDialog(onDismiss: () -> Unit, isPremium: Boolean = false, onSchedule: suspend (Long, Int) -> Unit) {
+internal fun ScheduleMessageDialog(onDismiss: () -> Unit, onSchedule: suspend (Long, Int) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var time by remember { mutableStateOf(LocalDateTime.now().plusHours(1).withSecond(0).withNano(0)) }
@@ -27,7 +27,7 @@ internal fun ScheduleMessageDialog(onDismiss: () -> Unit, isPremium: Boolean = f
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     AlertDialog(onDismissRequest = { if (!busy) onDismiss() }, title = { Text("Schedule message") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Time zone: ${ZoneId.systemDefault().id}")
             OutlinedButton(enabled = !busy, onClick = {
                 DatePickerDialog(context, { _, year, month, day -> time = time.withDayOfMonth(1).withYear(year).withMonth(month + 1).withDayOfMonth(day) }, time.year, time.monthValue - 1, time.dayOfMonth).show()
@@ -36,11 +36,11 @@ internal fun ScheduleMessageDialog(onDismiss: () -> Unit, isPremium: Boolean = f
                 TimePickerDialog(context, { _, hour, minute -> time = time.withHour(hour).withMinute(minute) }, time.hour, time.minute, true).show()
             }) { Text(time.format(DateTimeFormatter.ofPattern("HH:mm"))) }
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                Checkbox(checked = daily, onCheckedChange = { daily = it }, enabled = isPremium && !busy)
+                Checkbox(checked = daily, onCheckedChange = { daily = it }, enabled = !busy)
                 Text("Repeat daily (24 hours)")
             }
-            if (!isPremium) Text("Daily repeating requires Telegram Premium. One-time scheduling is still available.")
-            Text(if (daily) "Telegram will repeat this message every 24 hours, starting at the selected time. Local time may shift with daylight saving time." else "Telegram will send this message at the selected time.")
+            Text("Saved on this device. No Premium required. Keep this account logged in and allow background activity. Offline, battery restrictions or force-stop can delay sending; reopen the app after force-stop.")
+            if (daily) Text("Repeats every 24 hours. Missed days are not sent in a burst. Local time may shift with daylight saving time.")
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }, confirmButton = {
@@ -85,6 +85,7 @@ internal fun ScheduledMessagesDialog(chatId: Long, viewModel: ChatwaveViewModel,
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             messages.forEach { message ->
                 if (message.repeatPeriod > 0) Text(if (message.repeatPeriod == 86400) "Repeats daily (24 hours)" else "Repeats every ${message.repeatPeriod / 3600} hours")
+                Text(message.status)
                 Text(message.text, maxLines = 3)
                 Text(if (message.sendAt == 0L) "When online" else Instant.ofEpochSecond(message.sendAt).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")))
                 TextButton(enabled = !busy, onClick = {

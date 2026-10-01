@@ -20,14 +20,14 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class ScheduledMessageUiTest {
-    @Test fun premiumAccountCanSubmitDailySchedule() {
+    @Test fun ordinaryAccountCanSubmitDailySchedule() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             val period = AtomicInteger(-1)
             scenario.onActivity { activity ->
                 activity.setContent {
                     var shown by remember { mutableStateOf(true) }
                     ChatwaveTheme {
-                        if (shown) ScheduleMessageDialog(onDismiss = { shown = false }, isPremium = true, onSchedule = { _, repeat -> period.set(repeat) })
+                        if (shown) ScheduleMessageDialog(onDismiss = { shown = false }, onSchedule = { _, repeat -> period.set(repeat) })
                         else Text("Daily schedule accepted", Modifier.padding(64.dp))
                     }
                 }
@@ -56,7 +56,7 @@ class ScheduledMessageUiTest {
             }
             val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
             assertTrue(device.wait(Until.hasObject(By.text("Schedule")), 10000))
-            assertFalse(device.findObject(By.checkable(true)).isEnabled)
+            assertTrue(device.findObject(By.checkable(true)).isEnabled)
             device.findObject(By.text("Schedule")).click()
             assertTrue(device.wait(Until.hasObject(By.text("Server rejected schedule")), 10000))
             assertEquals(1, calls.get())

@@ -352,6 +352,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     fun logout() {
+        LocalSchedules(appContext, accountId).clear()
         _authState.value = AuthState.LoggingOut
         _currentUser.value = null
         client?.send("logOut")
@@ -781,35 +782,63 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     suspend fun scheduleMessage(chatId: Long, text: String, entities: List<MessageEntity>, path: String?, mimeType: String?, replyId: Long?, sendAt: Long, repeatPeriod: Int = 0) {
-        val options = scheduledSendOptions(sendAt, repeatPeriod = repeatPeriod)
-        if (repeatPeriod != 0) {
-            val me = checkNotNull(client).request("getMe")
-            require(me.optBoolean("is_premium")) { "Daily recurring messages require Telegram Premium." }
-        }
+        scheduledSendOptions(sendAt, repeatPeriod = repeatPeriod) // Validate without using server scheduling.
         require(text.isNotBlank() || path != null) { "Enter a message or attach media" }
         val content = if (path != null) mediaInputContent(path, mimeType ?: "application/octet-stream", text)
             .put("caption", formattedText(text, entities))
         else JSONObject().put("@type", "inputMessageText").put("text", formattedText(text, entities))
-            .put("clear_draft", true)
-        val fields = JSONObject().put("chat_id", chatId).put("input_message_content", content).put("options", options)
+            .put("clear_draft", false)
+        val fields = JSONObject().put("chat_id", chatId).put("input_message_content", content)
         replyId?.takeIf { it > 0 }?.let {
             fields.put("reply_to", JSONObject().put("@type", "inputMessageReplyToMessage").put("message_id", it))
         }
-        checkNotNull(client).request("sendMessage", fields)
+        withContext(Dispatchers.IO) { LocalSchedules(appContext, accountId).add(fields, text, sendAt, repeatPeriod, path) }
+    }
+
+    internal suspend fun sendLocalScheduled(fields: JSONObject) = kotlinx.coroutines.coroutineScope {
+        val telegram = checkNotNull(client)
+        val results = Channel<JSONObject>(Channel.UNLIMITED)
+        val collector = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            telegram.rawUpdates.collect { raw ->
+                val update = JSONObject(raw)
+                if (update.optString("@type") in setOf("updateMessageSendSucceeded", "updateMessageSendFailed")) results.send(update)
+            }
+        }
+        try {
+            kotlinx.coroutines.withTimeout(120_000) {
+                val message = telegram.request("sendMessage", fields)
+                check(message.optJSONObject("sending_state")?.optString("@type") != "messageSendingStateFailed")
+                if (message.optJSONObject("sending_state") != null) {
+                    while (true) {
+                        val update = results.receive()
+                        if (update.optLong("old_message_id") == message.optLong("id") &&
+                            update.optJSONObject("message")?.optLong("chat_id") == fields.getLong("chat_id")) {
+                            check(update.optString("@type") == "updateMessageSendSucceeded")
+                            break
+                        }
+                    }
+                }
+            }
+        } finally { collector.cancel(); results.close() }
     }
 
     suspend fun scheduledMessages(chatId: Long): List<ScheduledMessage> {
-        val result = checkNotNull(client).request("getChatScheduledMessages", JSONObject().put("chat_id", chatId))
-        val messages = result.optJSONArray("messages") ?: return emptyList()
-        return (0 until messages.length()).mapNotNull { index ->
+        val local = withContext(Dispatchers.IO) { LocalSchedules(appContext, accountId).list(chatId) }
+        val result = try { kotlinx.coroutines.withTimeout(5000) { checkNotNull(client).request("getChatScheduledMessages", JSONObject().put("chat_id", chatId)) } }
+        catch (_: kotlinx.coroutines.TimeoutCancellationException) { return local }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { return local }
+        val messages = result.optJSONArray("messages") ?: return local
+        return (local + (0 until messages.length()).mapNotNull { index ->
             val message = messages.optJSONObject(index) ?: return@mapNotNull null
             ScheduledMessage(message.optLong("id"), contentText(message.optJSONObject("content")).ifBlank { "Media message" },
                 message.optJSONObject("scheduling_state")?.optLong("send_date") ?: 0L,
                 message.optJSONObject("scheduling_state")?.optInt("repeat_period") ?: 0)
-        }.sortedBy { it.sendAt }
+        }).sortedBy { it.sendAt }
     }
 
     suspend fun cancelScheduledMessage(chatId: Long, messageId: Long) {
+        if (messageId < 0) { withContext(Dispatchers.IO) { LocalSchedules(appContext, accountId).cancel(messageId) }; return }
         checkNotNull(client).request("deleteMessages", JSONObject().put("chat_id", chatId).put("message_ids", JSONArray().put(messageId)).put("revoke", true))
     }
 

@@ -47,8 +47,8 @@ android {
         minSdk = 29
         targetSdk = 35
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 21
-        versionName = "0.1.20"
+        versionCode = 22
+        versionName = "0.1.21"
 
         buildConfigField("int", "TELEGRAM_API_ID", secret("telegram.apiId").ifBlank { "0" })
         buildConfigField("String", "TELEGRAM_API_HASH", "\"${secret("telegram.apiHash").replace("\"", "\\\"")}\"")
@@ -135,6 +135,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     // TDLib's native Android artifact and Kotlin coroutine helpers.

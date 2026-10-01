@@ -22,6 +22,7 @@ fun UserProfileDialog(userId: Long, viewModel: ChatwaveViewModel, onDismiss: () 
     var opening by remember(userId) { mutableStateOf(false) }
     val users by viewModel.users.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
     val user = users[userId] ?: profile?.user
     LaunchedEffect(userId, retry) {
         loading = true
@@ -47,7 +48,19 @@ fun UserProfileDialog(userId: Long, viewModel: ChatwaveViewModel, onDismiss: () 
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             it.username?.let { name -> Text("@$name") }
                             it.phoneNumber?.takeIf(String::isNotBlank)?.let { phone -> Text("+$phone") }
-                            profile?.bio?.takeIf(String::isNotBlank)?.let { bio -> Text(bio) }
+                            profile?.bio?.takeIf(String::isNotBlank)?.let { bio ->
+                                val annotated = messageAnnotatedString(com.example.tgclient.model.MessageSummary(id = 0, chatId = 0, senderName = "", text = bio, entities = profile?.bioEntities.orEmpty()))
+                                androidx.compose.foundation.text.ClickableText(text = annotated, style = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface), onClick = { offset ->
+                                    annotated.getStringAnnotations("chatwave_link", offset, offset).firstOrNull()?.let { link ->
+                                        scope.launch {
+                                            val target = telegramChatTarget(link.item)
+                                            val chatId = target?.let { viewModel.resolveProfileLink(it) }
+                                            if (chatId != null) onOpenChat(chatId)
+                                            else openExternalLink(context, link.item)
+                                        }
+                                    }
+                                })
+                            }
                         }
                     }
                 }

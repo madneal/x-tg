@@ -729,6 +729,10 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     fun sendLocalMedia(chatId: Long, path: String, mimeType: String, caption: String = "", replyToMessageId: Long? = null) {
+        sendContent(chatId, mediaInputContent(path, mimeType, caption), replyToMessageId)
+    }
+
+    private fun mediaInputContent(path: String, mimeType: String, caption: String): JSONObject {
         val inputFile = JSONObject().put("@type", "inputFileLocal").put("path", path)
         val formattedCaption = JSONObject().put("@type", "formattedText").put("text", caption).put("entities", JSONArray())
         val content = when {
@@ -772,7 +776,35 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
                 .put("disable_content_type_detection", false)
                 .put("caption", formattedCaption)
         }
-        sendContent(chatId, content, replyToMessageId)
+        return content
+    }
+
+    suspend fun scheduleMessage(chatId: Long, text: String, entities: List<MessageEntity>, path: String?, mimeType: String?, replyId: Long?, sendAt: Long) {
+        val options = scheduledSendOptions(sendAt)
+        require(text.isNotBlank() || path != null) { "Enter a message or attach media" }
+        val content = if (path != null) mediaInputContent(path, mimeType ?: "application/octet-stream", text)
+            .put("caption", formattedText(text, entities))
+        else JSONObject().put("@type", "inputMessageText").put("text", formattedText(text, entities))
+            .put("clear_draft", true)
+        val fields = JSONObject().put("chat_id", chatId).put("input_message_content", content).put("options", options)
+        replyId?.takeIf { it > 0 }?.let {
+            fields.put("reply_to", JSONObject().put("@type", "inputMessageReplyToMessage").put("message_id", it))
+        }
+        checkNotNull(client).request("sendMessage", fields)
+    }
+
+    suspend fun scheduledMessages(chatId: Long): List<ScheduledMessage> {
+        val result = checkNotNull(client).request("getChatScheduledMessages", JSONObject().put("chat_id", chatId))
+        val messages = result.optJSONArray("messages") ?: return emptyList()
+        return (0 until messages.length()).mapNotNull { index ->
+            val message = messages.optJSONObject(index) ?: return@mapNotNull null
+            ScheduledMessage(message.optLong("id"), contentText(message.optJSONObject("content")).ifBlank { "Media message" },
+                message.optJSONObject("scheduling_state")?.optLong("send_date") ?: 0L)
+        }.sortedBy { it.sendAt }
+    }
+
+    suspend fun cancelScheduledMessage(chatId: Long, messageId: Long) {
+        checkNotNull(client).request("deleteMessages", JSONObject().put("chat_id", chatId).put("message_ids", JSONArray().put(messageId)).put("revoke", true))
     }
 
     /** Sends any supported content and keeps the reply metadata identical for text and media. */
@@ -1005,6 +1037,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     private fun publishMessage(message: JSONObject) {
+        if (!message.isNull("scheduling_state")) return
         val chatId = message.optLong("chat_id").takeIf { it != 0L } ?: return
         val isChannel = chatCache[chatId]?.isChannelChat() == true
         val mapped = mapMessage(message, chatId, isChannel) ?: return
@@ -1015,6 +1048,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
 
     private fun updateMessageSendSucceeded(update: JSONObject) {
         val message = update.optJSONObject("message") ?: return
+        if (!message.isNull("scheduling_state")) return
         val chatId = message.optLong("chat_id").takeIf { it != 0L } ?: return
         val isChannel = chatCache[chatId]?.isChannelChat() == true
         val mapped = mapMessage(message, chatId, isChannel)?.copy(
@@ -1032,6 +1066,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
 
     private fun updateMessageSendFailed(update: JSONObject) {
         val message = update.optJSONObject("message") ?: return
+        if (!message.isNull("scheduling_state")) return
         val chatId = message.optLong("chat_id").takeIf { it != 0L } ?: return
         val isChannel = chatCache[chatId]?.isChannelChat() == true
         val sendingState = message.optJSONObject("sending_state")

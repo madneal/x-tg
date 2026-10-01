@@ -33,6 +33,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DoneAll
@@ -130,6 +131,8 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     val context = LocalContext.current
     var draft by remember { mutableStateOf(TextFieldValue()) }
     var profileUserId by remember(chatId) { mutableStateOf<Long?>(null) }
+    var showSchedule by remember(chatId) { mutableStateOf(false) }
+    var showScheduledMessages by remember(chatId) { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(false) }
     var showActivityDialog by remember { mutableStateOf(false) }
     var confirmLeave by remember { mutableStateOf(false) }
@@ -228,6 +231,10 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                             Icon(Icons.Default.MoreVert, contentDescription = "Chat actions")
                         }
                         DropdownMenu(expanded = showChatMenu, onDismissRequest = { showChatMenu = false }) {
+                            DropdownMenuItem(text = { Text("Scheduled messages") }, onClick = {
+                                showChatMenu = false
+                                showScheduledMessages = true
+                            })
                             DropdownMenuItem(
                                 text = { Text(if (chat?.isPinned == true) "Unpin chat" else "Pin chat") },
                                 onClick = {
@@ -353,6 +360,9 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                             unfocusedIndicatorColor = Color.Transparent,
                         ),
                     )
+                    IconButton(enabled = editingTarget == null && (draft.text.isNotBlank() || pendingMedia != null), onClick = { showSchedule = true }) {
+                        Icon(Icons.Default.Schedule, contentDescription = "Schedule message")
+                    }
                     Spacer(Modifier.size(6.dp))
                     IconButton(
                         onClick = {
@@ -468,6 +478,17 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
             }
         }
     }
+
+    if (showSchedule) {
+        ScheduleMessageDialog(onDismiss = { showSchedule = false }, onSchedule = { sendAt ->
+            viewModel.scheduleMessage(chatId, draft.text, draft.annotatedString.toMessageEntities(), pendingMedia?.path, pendingMedia?.mimeType, replyTarget?.id, sendAt)
+            draft = TextFieldValue()
+            pendingMedia = null
+            replyTarget = null
+            showScheduledMessages = true
+        })
+    }
+    if (showScheduledMessages) ScheduledMessagesDialog(chatId, viewModel, onDismiss = { showScheduledMessages = false })
 
     profileUserId?.let { userId ->
         UserProfileDialog(userId, viewModel, onDismiss = { profileUserId = null }, onOpenChat = {
@@ -1068,6 +1089,7 @@ internal fun messageAnnotatedString(message: MessageSummary): AnnotatedString {
         if (start >= end) return@forEach
         entity.style()?.let { builder.addStyle(it, start, end) }
         entity.linkTarget(message.text.substring(start, end))?.let { target ->
+            builder.addStyle(linkStyle(), start, end)
             builder.addStringAnnotation("chatwave_link", target, start, end)
             occupiedLinks += start until end
         }
@@ -1144,7 +1166,7 @@ internal fun telegramChatTarget(raw: String): String? {
     return null
 }
 
-private fun openExternalLink(context: Context, target: String) {
+internal fun openExternalLink(context: Context, target: String) {
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(target)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     runCatching { context.startActivity(intent) }
 }

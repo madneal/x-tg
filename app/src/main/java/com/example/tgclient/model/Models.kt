@@ -13,7 +13,7 @@ data class TelegramUser(
     val lastName: String = "",
 )
 
-data class UserProfile(val user: TelegramUser, val bio: String, val personalChatId: Long?)
+data class UserProfile(val user: TelegramUser, val bio: String, val personalChatId: Long?, val bioEntities: List<MessageEntity> = emptyList())
 
 data class AccountSummary(
     val id: String,

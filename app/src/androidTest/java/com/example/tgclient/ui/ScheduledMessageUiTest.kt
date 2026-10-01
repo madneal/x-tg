@@ -20,13 +20,34 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class ScheduledMessageUiTest {
+    @Test fun premiumAccountCanSubmitDailySchedule() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            val period = AtomicInteger(-1)
+            scenario.onActivity { activity ->
+                activity.setContent {
+                    var shown by remember { mutableStateOf(true) }
+                    ChatwaveTheme {
+                        if (shown) ScheduleMessageDialog(onDismiss = { shown = false }, isPremium = true, onSchedule = { _, repeat -> period.set(repeat) })
+                        else Text("Daily schedule accepted", Modifier.padding(64.dp))
+                    }
+                }
+            }
+            val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
+            assertTrue(device.wait(Until.hasObject(By.text("Repeat daily (24 hours)")), 10000))
+            device.findObject(By.checkable(true)).click()
+            device.findObject(By.text("Schedule")).click()
+            assertTrue(device.wait(Until.hasObject(By.text("Daily schedule accepted")), 10000))
+            assertEquals(86400, period.get())
+        }
+    }
+
     @Test fun failedRequestKeepsSchedulingDialogOpen() {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             val calls = AtomicInteger()
             scenario.onActivity { activity ->
                 activity.setContent {
                     ChatwaveTheme {
-                        ScheduleMessageDialog(onDismiss = {}, onSchedule = {
+                        ScheduleMessageDialog(onDismiss = {}, onSchedule = { _, _ ->
                             calls.incrementAndGet()
                             throw IllegalStateException("Server rejected schedule")
                         })
@@ -35,6 +56,7 @@ class ScheduledMessageUiTest {
             }
             val device = UiDevice.getInstance(InstrumentationRegistry.getInstrumentation())
             assertTrue(device.wait(Until.hasObject(By.text("Schedule")), 10000))
+            assertFalse(device.findObject(By.checkable(true)).isEnabled)
             device.findObject(By.text("Schedule")).click()
             assertTrue(device.wait(Until.hasObject(By.text("Server rejected schedule")), 10000))
             assertEquals(1, calls.get())
@@ -49,7 +71,8 @@ class ScheduledMessageUiTest {
                 activity.setContent {
                     var shown by remember { mutableStateOf(true) }
                     ChatwaveTheme {
-                        if (shown) ScheduleMessageDialog(onDismiss = { shown = false }, onSchedule = { sendAt ->
+                        if (shown) ScheduleMessageDialog(onDismiss = { shown = false }, onSchedule = { sendAt, repeatPeriod ->
+                            assertEquals(0, repeatPeriod)
                             assertTrue(sendAt > System.currentTimeMillis() / 1000 + 3000)
                             calls.incrementAndGet()
                         }) else Text("Schedule accepted", Modifier.padding(64.dp))

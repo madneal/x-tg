@@ -9,6 +9,7 @@ data class TelegramUser(
     val avatarPath: String? = null,
     /** Changes whenever the local avatar file is replaced, so Compose can invalidate its bitmap cache. */
     val avatarRevision: Long = 0L,
+    val isPremium: Boolean = false,
     val firstName: String = "",
     val lastName: String = "",
 )

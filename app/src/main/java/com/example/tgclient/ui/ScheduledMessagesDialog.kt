@@ -19,10 +19,11 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 @Composable
-internal fun ScheduleMessageDialog(onDismiss: () -> Unit, onSchedule: suspend (Long) -> Unit) {
+internal fun ScheduleMessageDialog(onDismiss: () -> Unit, isPremium: Boolean = false, onSchedule: suspend (Long, Int) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var time by remember { mutableStateOf(LocalDateTime.now().plusHours(1).withSecond(0).withNano(0)) }
+    var daily by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     AlertDialog(onDismissRequest = { if (!busy) onDismiss() }, title = { Text("Schedule message") }, text = {
@@ -34,7 +35,12 @@ internal fun ScheduleMessageDialog(onDismiss: () -> Unit, onSchedule: suspend (L
             OutlinedButton(enabled = !busy, onClick = {
                 TimePickerDialog(context, { _, hour, minute -> time = time.withHour(hour).withMinute(minute) }, time.hour, time.minute, true).show()
             }) { Text(time.format(DateTimeFormatter.ofPattern("HH:mm"))) }
-            Text("Telegram will send this message at the selected time.")
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                Checkbox(checked = daily, onCheckedChange = { daily = it }, enabled = isPremium && !busy)
+                Text("Repeat daily (24 hours)")
+            }
+            if (!isPremium) Text("Daily repeating requires Telegram Premium. One-time scheduling is still available.")
+            Text(if (daily) "Telegram will repeat this message every 24 hours, starting at the selected time. Local time may shift with daylight saving time." else "Telegram will send this message at the selected time.")
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }, confirmButton = {
@@ -44,7 +50,7 @@ internal fun ScheduleMessageDialog(onDismiss: () -> Unit, onSchedule: suspend (L
             error = null
             scope.launch {
                 try {
-                    onSchedule(time.atZone(ZoneId.systemDefault()).toEpochSecond())
+                    onSchedule(time.atZone(ZoneId.systemDefault()).toEpochSecond(), if (daily) 86400 else 0)
                     onDismiss()
                 } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
                     error = "No confirmation yet. Check Scheduled messages before retrying."
@@ -78,6 +84,7 @@ internal fun ScheduledMessagesDialog(chatId: Long, viewModel: ChatwaveViewModel,
             if (!loading && error == null && messages.isEmpty()) Text("No scheduled messages")
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             messages.forEach { message ->
+                if (message.repeatPeriod > 0) Text(if (message.repeatPeriod == 86400) "Repeats daily (24 hours)" else "Repeats every ${message.repeatPeriod / 3600} hours")
                 Text(message.text, maxLines = 3)
                 Text(if (message.sendAt == 0L) "When online" else Instant.ofEpochSecond(message.sendAt).atZone(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")))
                 TextButton(enabled = !busy, onClick = {
@@ -88,7 +95,7 @@ internal fun ScheduledMessagesDialog(chatId: Long, viewModel: ChatwaveViewModel,
                         catch (_: Exception) { error = "Unable to cancel scheduled message. Please retry." }
                         finally { busy = false }
                     }
-                }) { Text("Cancel scheduled message") }
+                }) { Text(if (message.repeatPeriod > 0) "Cancel recurring message" else "Cancel scheduled message") }
                 HorizontalDivider()
             }
             TextButton(enabled = !loading && !busy, onClick = { refresh++ }) { Text("Refresh") }

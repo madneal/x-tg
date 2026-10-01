@@ -780,8 +780,12 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         return content
     }
 
-    suspend fun scheduleMessage(chatId: Long, text: String, entities: List<MessageEntity>, path: String?, mimeType: String?, replyId: Long?, sendAt: Long) {
-        val options = scheduledSendOptions(sendAt)
+    suspend fun scheduleMessage(chatId: Long, text: String, entities: List<MessageEntity>, path: String?, mimeType: String?, replyId: Long?, sendAt: Long, repeatPeriod: Int = 0) {
+        val options = scheduledSendOptions(sendAt, repeatPeriod = repeatPeriod)
+        if (repeatPeriod != 0) {
+            val me = checkNotNull(client).request("getMe")
+            require(me.optBoolean("is_premium")) { "Daily recurring messages require Telegram Premium." }
+        }
         require(text.isNotBlank() || path != null) { "Enter a message or attach media" }
         val content = if (path != null) mediaInputContent(path, mimeType ?: "application/octet-stream", text)
             .put("caption", formattedText(text, entities))
@@ -800,7 +804,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         return (0 until messages.length()).mapNotNull { index ->
             val message = messages.optJSONObject(index) ?: return@mapNotNull null
             ScheduledMessage(message.optLong("id"), contentText(message.optJSONObject("content")).ifBlank { "Media message" },
-                message.optJSONObject("scheduling_state")?.optLong("send_date") ?: 0L)
+                message.optJSONObject("scheduling_state")?.optLong("send_date") ?: 0L,
+                message.optJSONObject("scheduling_state")?.optInt("repeat_period") ?: 0)
         }.sortedBy { it.sendAt }
     }
 
@@ -1280,6 +1285,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             avatarFileId = avatarFileId,
             avatarPath = avatarPath,
             avatarRevision = avatarPath?.let(::fileRevision) ?: 0L,
+            isPremium = user.optBoolean("is_premium"),
             firstName = firstName,
             lastName = lastName,
         )

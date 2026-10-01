@@ -47,8 +47,8 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
 
     suspend fun loadUserProfile(userId: Long) = repository.loadUserProfile(userId)
     suspend fun resolveProfileLink(target: String) = repository.resolveChatTarget(target)
-    suspend fun scheduleMessage(chatId: Long, text: String, entities: List<MessageEntity>, path: String?, mimeType: String?, replyId: Long?, sendAt: Long) =
-        repository.scheduleMessage(chatId, text, entities, path, mimeType, replyId, sendAt)
+    suspend fun scheduleMessage(chatId: Long, text: String, entities: List<MessageEntity>, path: String?, mimeType: String?, replyId: Long?, sendAt: Long, repeatPeriod: Int = 0) =
+        repository.scheduleMessage(chatId, text, entities, path, mimeType, replyId, sendAt, repeatPeriod)
     suspend fun scheduledMessages(chatId: Long) = repository.scheduledMessages(chatId)
     suspend fun cancelScheduledMessage(chatId: Long, messageId: Long) = repository.cancelScheduledMessage(chatId, messageId)
     suspend fun resolveProfileChannel(chatId: Long) = repository.resolveChatTarget(chatId.toString())

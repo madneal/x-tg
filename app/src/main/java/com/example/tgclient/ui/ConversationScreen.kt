@@ -136,6 +136,10 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
     var showScheduledMessages by remember(chatId) { mutableStateOf(false) }
     var showChatMenu by remember { mutableStateOf(false) }
     var showActivityDialog by remember { mutableStateOf(false) }
+    var showReferencesDialog by remember { mutableStateOf(false) }
+    var references by remember(chatId) { mutableStateOf(emptyList<com.example.tgclient.model.ChatReference>()) }
+    var referencesLoading by remember(chatId) { mutableStateOf(false) }
+    var referencesError by remember(chatId) { mutableStateOf<String?>(null) }
     var confirmLeave by remember { mutableStateOf(false) }
     var confirmClearHistory by remember { mutableStateOf(false) }
     var selectedMessage by remember { mutableStateOf<MessageSummary?>(null) }
@@ -265,6 +269,26 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                                         showChatMenu = false
                                         showActivityDialog = true
                                         viewModel.loadGroupActivityStats(chatId)
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Extract links and usernames (24h)") },
+                                    onClick = {
+                                        showChatMenu = false
+                                        showReferencesDialog = true
+                                        referencesLoading = true
+                                        referencesError = null
+                                        scrollScope.launch {
+                                            try {
+                                                references = viewModel.extractChatReferences(chatId)
+                                            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                                throw cancelled
+                                            } catch (error: Exception) {
+                                                referencesError = error.message ?: "Unable to load recent messages."
+                                            } finally {
+                                                referencesLoading = false
+                                            }
+                                        }
                                     },
                                 )
                             }
@@ -715,6 +739,24 @@ fun ConversationScreen(chatId: Long, viewModel: ChatwaveViewModel, onBack: () ->
                     enabled = linkUrl.trim().startsWith("http://") || linkUrl.trim().startsWith("https://"),
                 ) { Text("Apply") }
             },
+        )
+    }
+    if (showReferencesDialog) {
+        ChatReferencesDialog(
+            references = references,
+            loading = referencesLoading,
+            error = referencesError,
+            onRefresh = {
+                referencesLoading = true
+                referencesError = null
+                scrollScope.launch {
+                    try { references = viewModel.extractChatReferences(chatId) }
+                    catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (error: Exception) { referencesError = error.message ?: "Unable to load recent messages." }
+                    finally { referencesLoading = false }
+                }
+            },
+            onDismiss = { showReferencesDialog = false },
         )
     }
 }

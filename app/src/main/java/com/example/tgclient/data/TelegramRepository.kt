@@ -8,6 +8,7 @@ import com.example.tgclient.model.AppSettings
 import com.example.tgclient.model.AuthAction
 import com.example.tgclient.model.AuthState
 import com.example.tgclient.model.ChatFolder
+import com.example.tgclient.model.ChatReference
 import com.example.tgclient.model.ChatHistoryState
 import com.example.tgclient.model.ChatListLoadState
 import com.example.tgclient.model.ChatSummary
@@ -46,6 +47,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
@@ -642,6 +644,45 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         }
     }
 
+    /** Fetches recent server history so extraction is not limited to messages currently on screen. */
+    suspend fun extractChatReferences(chatId: Long): List<ChatReference> = withContext(Dispatchers.IO) {
+        val cutoff = System.currentTimeMillis() / 1000L - ACTIVITY_WINDOW_SECONDS
+        val result = LinkedHashMap<String, ChatReference>()
+        var fromMessageId = 0L
+        var pages = 0
+        while (pages < MAX_REFERENCE_PAGES) {
+            val response = client?.request(
+                "getChatHistory",
+                JSONObject().put("chat_id", chatId).put("from_message_id", fromMessageId)
+                    .put("offset", 0).put("limit", 100).put("only_local", false),
+            ) ?: break
+            val messages = response.optJSONArray("messages") ?: break
+            if (messages.length() == 0) break
+            var reachedCutoff = false
+            for (index in 0 until messages.length()) {
+                val message = messages.optJSONObject(index) ?: continue
+                val date = message.optLong("date")
+                if (date in 1 until cutoff) {
+                    reachedCutoff = true
+                    break
+                }
+                if (date < cutoff) continue
+                val textObject = message.optJSONObject("content")?.let { content ->
+                    content.optJSONObject("text") ?: content.optJSONObject("caption")
+                }
+                extractChatReferences(contentText(message.optJSONObject("content")), parseEntities(textObject)).forEach { reference ->
+                    result.putIfAbsent(reference.target.lowercase().trimEnd('/'), reference)
+                }
+            }
+            if (reachedCutoff) break
+            val lastMessageId = messages.optJSONObject(messages.length() - 1)?.optLong("id") ?: 0L
+            if (lastMessageId <= 0L || lastMessageId == fromMessageId) break
+            fromMessageId = lastMessageId
+            pages += 1
+        }
+        result.values.toList()
+    }
+
     fun sendText(chatId: Long, text: String, replyToMessageId: Long? = null) {
         sendText(chatId, text, emptyList(), replyToMessageId)
     }
@@ -1163,8 +1204,24 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         val messageIds = update.optJSONArray("message_ids") ?: return
         val ids = (0 until messageIds.length()).map { messageIds.optLong(it) }.toSet()
         if (_settings.value.retainDeletedMessages) {
-            retainedMessageWrites.trySend(RetentionEvent.Deleted(chatId, ids))
-            _messages.updateTimeline(chatId) { current -> current.map { message -> if (message.id in ids) message.copy(isDeleted = true) else message } }
+            val current = _messages.value[chatId].orEmpty()
+            // Persist immediately for delete updates. The normal save path is
+            // intentionally batched, but a fast delete can otherwise arrive
+            // before that batch and leave no record for markDeleted to update.
+            retentionScope.launch(Dispatchers.IO) {
+                val visibleCopies = current.filter { it.id in ids }.map { it.copy(isDeleted = true) }
+                messageRetentionStore.saveAll(visibleCopies)
+                messageRetentionStore.markDeleted(chatId, ids)
+                val restored = messageRetentionStore.loadMessages(chatId, ids)
+                if (restored.isNotEmpty()) {
+                    withContext(Dispatchers.Default) {
+                        _messages.updateTimeline(chatId) { existing -> mergeMessages(existing, restored) }
+                    }
+                }
+            }
+            _messages.updateTimeline(chatId) { timeline ->
+                timeline.map { message -> if (message.id in ids) message.copy(isDeleted = true) else message }
+            }
         } else {
             _messages.updateTimeline(chatId) { current -> current.filterNot { it.id in ids } }
         }
@@ -1801,6 +1858,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         const val CHAT_PUBLICATION_COALESCE_MS = 16L
         const val ACTIVITY_WINDOW_SECONDS = 24 * 60 * 60L
         const val MAX_ACTIVITY_PAGES = 200
+        const val MAX_REFERENCE_PAGES = 200
         val NON_ACTIVITY_MESSAGE_TYPES = setOf(
             "messageCall",
             "messagePinMessage",

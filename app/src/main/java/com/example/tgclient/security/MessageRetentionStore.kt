@@ -59,6 +59,19 @@ class MessageRetentionStore(context: Context, accountId: String) {
         )
     }
 
+    /** Loads specific records so a delete update can restore a message even when it is not visible. */
+    fun loadMessages(chatId: Long, messageIds: Set<Long>): List<MessageSummary> = synchronized(lock) {
+        val ids = messageIds.filter { it > 0L }.distinct()
+        if (ids.isEmpty()) return@synchronized emptyList()
+        val placeholders = ids.joinToString(",") { "?" }
+        readMessages(
+            databaseLocked(),
+            "chat_id = ? AND message_id IN ($placeholders)",
+            arrayOf(chatId.toString()) + ids.map(Long::toString).toTypedArray(),
+            ids.size,
+        )
+    }
+
     /** Returns a bounded older page before the current oldest visible message. */
     fun loadChatBefore(chatId: Long, before: MessageSummary, limit: Int): List<MessageSummary> = synchronized(lock) {
         readMessages(

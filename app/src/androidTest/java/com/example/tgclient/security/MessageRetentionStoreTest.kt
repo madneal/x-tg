@@ -127,6 +127,22 @@ class MessageRetentionStoreTest {
     }
 
     @Test
+    fun loadsDeletedMessageByIdWhenItIsNotInVisibleTimeline() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val accountId = "delete_lookup_${UUID.randomUUID().toString().replace("-", "")}"
+        val store = MessageRetentionStore(context, accountId)
+        try {
+            store.saveAll(listOf(MessageSummary(42L, 778L, "Sender", text = "kept locally", dateEpochSeconds = 42)))
+            store.markDeleted(778L, setOf(42L))
+            val restored = store.loadMessages(778L, setOf(42L))
+            assertEquals(1, restored.size)
+            assertTrue(restored.single().isDeleted)
+        } finally {
+            store.clear()
+        }
+    }
+
+    @Test
     fun retainedMediaCopyLivesUntilItsLastMessageReferenceIsRemoved() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val accountId = "retention_media_${UUID.randomUUID().toString().replace("-", "")}" 

@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.tgclient.data.TelegramRepository
 import com.example.tgclient.model.AuthState
+import com.example.tgclient.model.ChatReference
 import com.example.tgclient.model.MessageEntity
 import com.example.tgclient.model.MessageSummary
 import com.example.tgclient.model.MediaType
@@ -52,6 +53,7 @@ class ChatwaveViewModel(private val repository: TelegramRepository) : ViewModel(
     suspend fun scheduledMessages(chatId: Long) = repository.scheduledMessages(chatId)
     suspend fun cancelScheduledMessage(chatId: Long, messageId: Long) = repository.cancelScheduledMessage(chatId, messageId)
     suspend fun resolveProfileChannel(chatId: Long) = repository.resolveChatTarget(chatId.toString())
+    suspend fun extractChatReferences(chatId: Long): List<ChatReference> = repository.extractChatReferences(chatId)
     suspend fun createPrivateChat(userId: Long) = repository.createPrivateChat(userId)
 
     fun submitPhone(phone: String) = repository.submitPhoneNumber(phone)

@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -45,6 +46,14 @@ fun ChatwaveApp(accountManager: TelegramAccountManager, updateManager: AppUpdate
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     var selectedChatId by remember { mutableStateOf<Long?>(null) }
     var showSettings by remember { mutableStateOf(false) }
+
+    // BackHandler is dispatched for both the system back button and the
+    // Android gesture-navigation swipe. Keep navigation inside the Compose
+    // flow while a chat or settings page is open; only the root chat list is
+    // allowed to finish the activity.
+    BackHandler(enabled = selectedChatId != null || showSettings) {
+        if (selectedChatId != null) selectedChatId = null else showSettings = false
+    }
 
     LaunchedEffect(authState, activeAccountId) {
         if (authState is AuthState.Ready && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

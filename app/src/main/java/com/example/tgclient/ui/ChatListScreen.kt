@@ -81,7 +81,12 @@ import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, onChatClick: (Long) -> Unit) {
+fun ChatListScreen(
+    viewModel: ChatwaveViewModel,
+    onSettingsClick: () -> Unit,
+    onChatClick: (Long) -> Unit,
+    onTogglePinned: (Long, Boolean) -> Unit = { _, _ -> },
+) {
     val chats by viewModel.chats.collectAsStateWithLifecycle()
     val chatListLoadState by viewModel.chatListLoadState.collectAsStateWithLifecycle()
     val folders by viewModel.chatFolders.collectAsStateWithLifecycle()
@@ -217,7 +222,7 @@ fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, on
                 LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
                     items(filteredChats, key = { it.id }) { chat ->
                         val labels = folders.filter { !it.isAllChats && chat.id in it.chatIds }
-                        ChatRow(chat, labels, onChatClick) { chatForLabels = chat }
+                        ChatRow(chat, labels, onChatClick, onTogglePinned) { chatForLabels = chat }
                     }
                 }
             }
@@ -244,7 +249,13 @@ fun ChatListScreen(viewModel: ChatwaveViewModel, onSettingsClick: () -> Unit, on
 }
 
 @Composable
-private fun ChatRow(chat: ChatSummary, labels: List<ChatFolder>, onChatClick: (Long) -> Unit, onLabelsClick: () -> Unit) {
+private fun ChatRow(
+    chat: ChatSummary,
+    labels: List<ChatFolder>,
+    onChatClick: (Long) -> Unit,
+    onTogglePinned: (Long, Boolean) -> Unit,
+    onLabelsClick: () -> Unit,
+) {
     var menuExpanded by remember { mutableStateOf(false) }
     Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth().clickable { onChatClick(chat.id) }) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -283,6 +294,13 @@ private fun ChatRow(chat: ChatSummary, labels: List<ChatFolder>, onChatClick: (L
                     Icon(Icons.Default.MoreVert, contentDescription = "Chat actions")
                 }
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text(if (chat.isPinned) "Unpin chat" else "Pin chat") },
+                        onClick = {
+                            menuExpanded = false
+                            onTogglePinned(chat.id, !chat.isPinned)
+                        },
+                    )
                     DropdownMenuItem(
                         text = { Text("Set labels") },
                         onClick = { menuExpanded = false; onLabelsClick() },

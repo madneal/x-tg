@@ -98,7 +98,12 @@ fun ChatwaveApp(accountManager: TelegramAccountManager, updateManager: AppUpdate
                             runCatching { context.startActivity(intent) }
                         },
                     )
-                    else -> ChatListScreen(viewModel, onSettingsClick = { showSettings = true }) { selectedChatId = it }
+                    else -> ChatListScreen(
+                        viewModel,
+                        onSettingsClick = { showSettings = true },
+                        onChatClick = { selectedChatId = it },
+                        onTogglePinned = viewModel::toggleChatPinned,
+                    )
                 }
                 SnackbarHost(
                     hostState = snackbarHostState,

@@ -83,6 +83,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val _connectionStatus = MutableStateFlow(TdConnectionStatus.UNKNOWN)
     private val settingsPreferences = context.getSharedPreferences("chatwave_settings", Context.MODE_PRIVATE)
     private val folderPreferences = context.getSharedPreferences("chatwave_chat_folders_$accountId", Context.MODE_PRIVATE)
+    private val localPinPreferences = context.getSharedPreferences("chatwave_local_pins_$accountId", Context.MODE_PRIVATE)
     private val _settings = MutableStateFlow(loadSettings())
     private val _chatFolders = MutableStateFlow(loadChatFolders())
     private val chatCache = ConcurrentHashMap<Long, JSONObject>()
@@ -92,7 +93,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private val pendingGallerySaves = ConcurrentHashMap<Int, GallerySaveRequest>()
     private val savedGalleryFiles = ConcurrentHashMap.newKeySet<Int>()
     private val requestedUsers = ConcurrentHashMap.newKeySet<Long>()
-    private val localPinOverrides = ConcurrentHashMap<Long, Boolean>()
+    private val localPinnedChats = ConcurrentHashMap.newKeySet<Long>()
     private val outgoingReplacements = OutgoingMessageReplacements()
     private val historyCursors = ConcurrentHashMap<Long, HistoryCursor>()
     private val chatsLoadGuard = AtomicBoolean(false)
@@ -118,6 +119,9 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     val chatFolders: StateFlow<List<ChatFolder>> = _chatFolders.asStateFlow()
 
     init {
+        localPinPreferences.getStringSet(LOCAL_PINNED_CHATS_KEY, emptySet()).orEmpty()
+            .mapNotNull(String::toLongOrNull)
+            .forEach(localPinnedChats::add)
         retentionWriterJob = retentionScope.launch {
             for (firstEvent in retainedMessageWrites) {
                 val batch = mutableListOf(firstEvent)
@@ -313,6 +317,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             // Device removal must continue even when Telegram can't confirm logout.
         } finally {
             close()
+            localPinPreferences.edit().clear().apply()
             retainedMessageWrites.cancel()
             retentionWriterJob.cancelAndJoin()
             withContext(Dispatchers.IO) { messageRetentionStore.clear() }
@@ -421,21 +426,19 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             )
             historyCursors.remove(chatId)
             _messages.update { it + (chatId to emptyList()) }
+            _chatHistory.update { it + (chatId to ChatHistoryState()) }
         }
     }
 
     fun toggleChatPinned(chatId: Long, pinned: Boolean) {
-        launchOperation {
-            client?.request(
-                "toggleChatIsPinned",
-                JSONObject()
-                    .put("chat_list", JSONObject().put("@type", "chatListMain"))
-                    .put("chat_id", chatId)
-                    .put("is_pinned", pinned),
-            )
-            localPinOverrides[chatId] = pinned
-            publishChats()
-        }
+        // This is deliberately local. Telegram's toggleChatIsPinned is limited by
+        // server-side chat-list rules; Chatwave's local pin list supports any
+        // number of chats and survives process restarts without changing TDLib.
+        if (pinned) localPinnedChats.add(chatId) else localPinnedChats.remove(chatId)
+        localPinPreferences.edit()
+            .putStringSet(LOCAL_PINNED_CHATS_KEY, localPinnedChats.map(Long::toString).toSet())
+            .apply()
+        publishChats()
     }
 
     fun toggleChatMarkedAsUnread(chatId: Long, markedAsUnread: Boolean) {
@@ -478,6 +481,8 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     }
 
     suspend fun loadMessages(chatId: Long, limit: Int = 50) {
+        val cachedState = _chatHistory.value[chatId]
+        if (cachedState?.hasLoadedInitial == true) return
         val cursor = beginHistoryLoad(chatId, initial = true) ?: return
         updateChatHistoryState(chatId) { it.copy(isLoadingInitial = true, initialLoadError = null) }
         try {
@@ -489,7 +494,10 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             // Fetch the chat object before its history. This is important for
             // channels because TDLib describes them as chatTypeSupergroup with
             // is_channel=true, rather than using a separate chat type.
-            val chat = client?.request("getChat", JSONObject().put("chat_id", chatId))
+            // Chat-list hydration already cached this object in most cases. Reuse
+            // it instead of doing a second round trip when opening a conversation;
+            // request it only for a deep link or a chat not present in the list.
+            val chat = chatCache[chatId] ?: client?.request("getChat", JSONObject().put("chat_id", chatId))
             if (chat != null && chat.optLong("id") == chatId) {
                 chatCache[chatId] = chat
                 _openedChats.update { it + (chatId to mapChat(chat)) }
@@ -1098,7 +1106,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
     private fun publishChats() {
         _openedChats.update { opened -> opened.mapValues { (id, previous) -> chatCache[id]?.let(::mapChat) ?: previous } }
 
-        _chats.value = sortChatsByPosition(
+        val ordered = sortChatsByPosition(
             chats = chatCache.values,
             chatId = { it.optLong("id") },
             positionOrder = { chat ->
@@ -1110,6 +1118,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             },
         )
             .map(::mapChat)
+        _chats.value = ordered.filter { it.id in localPinnedChats } + ordered.filterNot { it.id in localPinnedChats }
     }
 
     private fun publishMessage(message: JSONObject) {
@@ -1387,7 +1396,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
             subtitle = chat.optJSONObject("last_message")?.let(::messagePreview).orEmpty(),
             unreadCount = chat.optInt("unread_count"),
             isMarkedAsUnread = chat.optBoolean("is_marked_as_unread"),
-            isPinned = localPinOverrides[chat.optLong("id")] ?: (chat.optJSONArray("positions")?.let { positions -> (0 until positions.length()).any { positions.optJSONObject(it)?.optBoolean("is_pinned") == true } } == true),
+            isPinned = chat.optLong("id") in localPinnedChats,
             isChannel = chat.isChannelChat(),
             isGroup = chat.isGroupChat(),
             isPrivate = chat.isPrivateChat(),
@@ -1846,6 +1855,7 @@ class TelegramRepository(context: Context, scope: CoroutineScope, val accountId:
         const val FOLDER_IDS_KEY = "folder_ids"
         const val FOLDER_NAME_PREFIX = "folder_name."
         const val FOLDER_CHATS_PREFIX = "folder_chats."
+        const val LOCAL_PINNED_CHATS_KEY = "chat_ids"
         const val AUTH_ACTION_TIMEOUT_MS = 15_000L
         const val SESSION_RESTORE_TIMEOUT_MS = 60_000L
         const val ACCOUNT_REMOVAL_LOGOUT_TIMEOUT_MS = 5_000L
